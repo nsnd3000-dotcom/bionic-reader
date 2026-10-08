@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 生成的测试样本
+# big.epub 由 `node tests/make-big-epub.mjs` 生成（140KB，不必进仓库）；
+# 但 test-epub-toc.mjs 会读它，所以克隆后要先跑一次生成脚本。
+tests/big.epub
+
+# 注意：tests/fixture.epub 与 tests/toc.epub 要**提交** ——
+# 多个测试直接读它们，fixture 同时也是"EPUB2 ncx 分支"的唯一样本。
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.bak
+*.tmp
+tests/_*

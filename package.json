@@ -1,0 +1,24 @@
+{
+  "name": "bionic-reader",
+  "version": "1.0.0",
+  "description": "单文件网页阅读器：导入本地 EPUB / TXT，用仿生阅读（Bionic Reading）方式重新排版，针对 ADHD 阅读时的跳行、走神、回读问题设计",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "keywords": [
+    "bionic-reading",
+    "epub",
+    "reader",
+    "adhd",
+    "accessibility",
+    "single-file"
+  ],
+  "scripts": {
+    "test": "node tests/run-all.mjs",
+    "serve": "python -m http.server 8080 --bind 127.0.0.1"
+  },
+  "devDependencies": {
+    "jsdom": "^30.1.2",
+    "jszip": "^3.10.2"
+  }
+}

@@ -1,0 +1,3026 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bionic Reader · 仿生阅读器</title>
+<meta name="description" content="导入 EPUB / TXT，用仿生阅读（Bionic Reading）方式排版，支持分章懒渲染与进度记忆。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+<style>
+/* ============================================================
+   1. 设计令牌 / 主题
+   ============================================================ */
+:root{
+  --bg:#fbfaf7;
+  --bg-elev:#ffffff;
+  --bg-sunken:#f2f0ea;
+  --text:#1c1b19;
+  --text-dim:#6b6862;
+  --text-faint:#a5a19a;
+  --border:#e3e0d8;
+  --border-strong:#cfcbc0;
+  --accent:#b4531f;
+  --accent-soft:#f6ece4;
+  --shadow:0 1px 2px rgba(28,27,25,.05), 0 4px 16px rgba(28,27,25,.06);
+  --shadow-lg:0 8px 40px rgba(28,27,25,.14);
+
+  /* 阅读区可调参数（由 JS 覆写） */
+  --reader-font: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+  --reader-size: 19px;
+  --reader-lh: 1.9;
+  --reader-width: 34em;
+  --reader-para: 1.1em;
+  --head-weight: 700;
+  --head-color: var(--text);
+  /* （--head-zoom 已移除：锚点缩放会破坏中文断行，见 CSS 里的完整记录） */
+  --tail-color: inherit;
+  --tail-opacity: .5;
+  --bionic-tint: #b4531f;
+}
+html[data-theme="dark"]{
+  --bg:#16171a;
+  --bg-elev:#1e2024;
+  --bg-sunken:#121316;
+  --text:#e6e4df;
+  --text-dim:#9a978f;
+  --text-faint:#6a6862;
+  --border:#2c2f34;
+  --border-strong:#3d4148;
+  --accent:#e08a52;
+  --accent-soft:#2a2019;
+  --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.35);
+  --shadow-lg:0 8px 40px rgba(0,0,0,.5);
+  --bionic-tint:#e08a52;
+  --head-color:#f2f0eb;
+}
+html[data-theme="sepia"]{
+  --bg:#f4ecd8; --bg-elev:#faf4e4; --bg-sunken:#ebe1c8;
+  --text:#3b3226; --text-dim:#7a6b53;
+  --text-faint:#a3947a; --border:#ddd0b3; --border-strong:#c9b894;
+  --accent:#9c5a1e; --accent-soft:#efe0c3;
+  --bionic-tint:#8a4a12; --head-color:#2e261b;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+/* ============================================================
+   ★ 毛玻璃材质（全局 UI）
+
+   目标：顶栏 / 侧栏目录 / 设置面板 / 底部章节条都做成毛玻璃，
+   让背后的**阅读正文**被模糊后透出来。
+
+   ★ 关键前提：`backdrop-filter` 只采样它**背后真实绘制的内容**。
+   如果阅读区 #stage 是不透明的（原来是 background:var(--bg)），
+   那么所有"浮在它上面"的面板背后都只是一块纯色 ——
+   模糊纯色 = 纯色，玻璃效果**根本不会出现**。
+   所以必须先把 #stage 改成半透明，UI 的玻璃才有东西可模糊。
+
+   三点量：
+     --glass-bg      玻璃底色（半透明）
+     --glass-border  玻璃边缘（比底色略亮，模拟厚度）
+     --glass-blur    模糊半径 */
+:root{
+  --glass-bg:color-mix(in srgb, var(--bg-elev) 72%, transparent);
+  --glass-bg-strong:color-mix(in srgb, var(--bg-elev) 84%, transparent);
+  --glass-border:color-mix(in srgb, #fff 42%, var(--border));
+  --glass-blur:blur(20px) saturate(165%);
+}
+html[data-theme="dark"]{
+  --glass-bg:color-mix(in srgb, var(--bg-elev) 68%, transparent);
+  --glass-bg-strong:color-mix(in srgb, var(--bg-elev) 82%, transparent);
+  --glass-border:rgba(255,255,255,.11);
+}
+/* 不支持 backdrop-filter：退回近乎不透明的底色，保证可读 */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  :root{
+    --glass-bg:var(--bg-elev);
+    --glass-bg-strong:var(--bg-elev);
+  }
+}
+
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  color:var(--text);
+  overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  /* 默认纯色。背景图是可选项，由 html[data-bg="image"] 打开（见下）。
+     这样"纯色"是真的零成本：不下载、不渲染那张图。 */
+  background-color:var(--bg);
+}
+
+/* ============================================================
+   ★ 阅读区背景：可选「纯色 / 背景图」
+
+   开图时给 body 铺两层：
+     1) 上层：主题色的半透明渐变（= 盖在照片上的"磨砂玻璃"）
+     2) 下层：拱廊照片
+   CSS 多层背景**先写的在上层**，所以渐变正好压住照片。
+
+   为什么玻璃层用渐变而不是纯色：
+   纯色会把照片压死成一块灰，等于没换背景；
+   渐变让边缘稍透、中间更实，保留"透过磨砂玻璃看建筑"的层次。
+
+   透明度取 86%~94%：
+     < 70% → 图案太清楚，跟正文抢注意力
+     > 96% → 等于没有背景图
+   ============================================================ */
+html[data-bg="image"] body{
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--bg) 86%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 90%, transparent) 45%,
+      color-mix(in srgb, var(--bg) 94%, transparent) 100%
+    ),
+    url("bg-arches.jpg");
+  background-size:cover, cover;
+  background-position:center, center;
+  background-repeat:no-repeat, no-repeat;
+  background-attachment:fixed, fixed;   /* 滚动时背景不动，文字在其上滑过 */
+}
+/* 深色主题：这张照片是黑白高对比（白墙、亮石板地），
+   浅色那套透明度完全压不住亮部，白字会糊在墙上。
+   所以深色主题把玻璃层几乎做实，只留极淡的纹理。 */
+html[data-bg="image"][data-theme="dark"] body{
+  background-image:
+    linear-gradient(
+      rgba(22,23,26,.94) 0%,
+      rgba(22,23,26,.96) 45%,
+      rgba(22,23,26,.98) 100%
+    ),
+    url("bg-arches.jpg");
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+::selection{background:var(--accent);color:#fff}
+
+/* ============================================================
+   2. 布局骨架
+   ============================================================ */
+#app{display:flex;flex-direction:column;height:100dvh}
+
+/* --- 顶栏 --- */
+#topbar{
+  display:flex;align-items:center;gap:10px;
+  padding:0 14px;height:52px;flex:0 0 52px;
+  /* 毛玻璃：半透明底 + 模糊背后的正文；顶部一条高光模拟玻璃上沿 */
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border-bottom:1px solid var(--glass-border);
+  box-shadow:inset 0 1px 0 color-mix(in srgb, #fff 34%, transparent);
+  position:relative;z-index:40;
+}
+.brand{
+  display:flex;align-items:center;gap:8px;
+  font-weight:650;font-size:14px;letter-spacing:.01em;
+  white-space:nowrap;
+}
+.brand .dot{
+  width:9px;height:9px;border-radius:50%;
+  background:var(--accent);flex:0 0 auto;
+}
+#bookTitle{
+  flex:1;min-width:0;
+  font-size:13px;color:var(--text-dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  text-align:center;padding:0 8px;
+}
+.tb-group{display:flex;align-items:center;gap:4px}
+.tb-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  height:34px;padding:0 11px;border-radius:8px;
+  font-size:13px;color:var(--text-dim);
+  transition:background .12s, color .12s;
+  white-space:nowrap;
+}
+.tb-btn:hover{background:var(--bg-sunken);color:var(--text)}
+.tb-btn.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.tb-btn.icon{padding:0 9px;font-size:15px}
+.tb-btn:disabled{opacity:.35;cursor:not-allowed}
+.tb-btn kbd{
+  font:600 10px/1 ui-monospace,monospace;color:var(--text-faint);
+  border:1px solid var(--border);border-radius:4px;padding:2px 4px;
+}
+.tb-btn .home-ico{font-size:15px;line-height:1}
+.tb-btn[hidden]{display:none}
+
+/* --- 主体三栏 --- */
+#main{flex:1;display:flex;min-height:0;position:relative}
+
+/* --- 侧边目录 --- */
+#sidebar{
+  flex:0 0 290px;width:290px;
+  /* 毛玻璃侧栏：背后是阅读正文，模糊后透出来 */
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border-right:1px solid var(--glass-border);
+  box-shadow:inset -1px 0 0 color-mix(in srgb, #fff 16%, transparent);
+  display:flex;flex-direction:column;min-height:0;
+  transition:margin-left .22s cubic-bezier(.4,0,.2,1);
+  position:relative;z-index:30;
+}
+#sidebar.hidden{margin-left:-290px}
+.side-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px 8px;flex:0 0 auto;
+}
+.side-head h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--text-faint);font-weight:700}
+#tocSearch{
+  margin:0 12px 8px;height:32px;padding:0 10px;
+  font:13px inherit;border:1px solid var(--border);border-radius:7px;
+  background:var(--bg-sunken);color:var(--text);width:calc(100% - 24px);
+}
+#tocSearch:focus{outline:2px solid var(--accent);outline-offset:-1px;background:var(--bg-elev)}
+#tocList{flex:1;overflow-y:auto;padding:0 8px 20px;scrollbar-width:thin}
+.toc-item{
+  display:block;width:100%;text-align:left;
+  padding:8px 10px;border-radius:7px;
+  font-size:13px;line-height:1.45;color:var(--text-dim);
+  margin-bottom:1px;
+}
+.toc-item:hover{background:var(--bg-sunken);color:var(--text)}
+.toc-item.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.toc-item .num{
+  display:inline-block;min-width:2.4em;color:var(--text-faint);
+  font:600 11px/1 ui-monospace,monospace;vertical-align:1px;
+}
+.toc-item.active .num{color:var(--accent)}
+/* ★ 目录层级（来自 EPUB 目录的嵌套深度）。
+   第 1 层（depth=0，如"恶棍列传"）是分组标题：加粗、无序号缩进；
+   更深的层缩进显示，让"书 → 篇"的结构看得见。
+   此前层级信息虽然解析出来了却没渲染，多级目录看起来是平铺的。 */
+.toc-item[data-depth="1"]{padding-left:26px;font-size:12.5px}
+.toc-item[data-depth="2"]{padding-left:42px;font-size:12.5px;color:var(--text-faint)}
+.toc-item[data-depth="3"]{padding-left:58px;font-size:12.5px;color:var(--text-faint)}
+.toc-item[data-depth="4"]{padding-left:74px;font-size:12.5px;color:var(--text-faint)}
+/* ★ 分组标题（一本书 / 一个部分，如「恶棍列传」）：正文为空，只做层级标识。
+   加粗、加深颜色、略大字号，让它一眼可辨"这是个分组"而不是可读章节。 */
+.toc-item[data-group="1"]{
+  font-weight:700;color:var(--text);font-size:13px;
+  margin-top:6px;letter-spacing:.01em;
+}
+.toc-item[data-group="1"] .num{color:var(--text-dim)}
+
+/* --- 阅读区 --- */
+/* ★ 阅读区**不能**有不透明背景，否则浮在上面的顶栏/侧栏/面板/
+   底部条背后只有一块纯色，backdrop-filter 模糊纯色 = 纯色，
+   玻璃效果根本不会出现。所以这里保持透明，页面底色交给 body。 */
+#stage{flex:1;min-width:0;position:relative;overflow:hidden}
+#scroller{
+  height:100%;overflow-y:auto;overflow-x:hidden;
+  scroll-behavior:auto;scrollbar-width:thin;
+}
+
+/* --- 底部章节条 ---
+   固定在阅读区底部，永远可见。
+   只有"上一章 / 下一章"两个动作：章内滚动交给滚轮与滚动条，
+   不额外提供"翻屏"按钮（与滚轮重复，且占地方）。 */
+#pager{
+  position:absolute;left:0;right:0;bottom:0;z-index:20;
+  display:flex;align-items:center;gap:8px;
+  padding:7px 12px;
+  /* 毛玻璃：背后是正文，模糊后透出来 */
+  background:var(--glass-bg-strong);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border-top:1px solid var(--glass-border);
+  box-shadow:inset 0 1px 0 color-mix(in srgb, #fff 26%, transparent);
+}
+/* 没打开书时隐藏 */
+#pager.hidden{display:none}
+.pg-btn{
+  flex:0 0 auto;
+  display:inline-flex;align-items:center;gap:5px;
+  padding:6px 13px;border-radius:7px;
+  /* 按钮本身也半透明，免得在玻璃条上变成实心补丁 */
+  border:1px solid var(--glass-border);
+  background:color-mix(in srgb, var(--bg-elev) 52%, transparent);
+  color:var(--text-dim);
+  font-size:12.5px;line-height:1;cursor:pointer;
+  font-family:inherit;white-space:nowrap;
+  transition:background .12s, color .12s, border-color .12s;
+}
+.pg-btn:hover:not(:disabled){
+  background:color-mix(in srgb, var(--bg-elev) 78%, transparent);
+  color:var(--text);border-color:var(--accent);
+}
+.pg-btn:disabled{opacity:.38;cursor:default}
+/* 中间的位置指示：当前章名 + 序号 + 章内滚动百分比 */
+#pgInfo{
+  flex:1 1 auto;min-width:0;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  font-size:12px;color:var(--text-faint);
+  overflow:hidden;white-space:nowrap;
+}
+#pgChapter{
+  overflow:hidden;text-overflow:ellipsis;max-width:46%;
+  color:var(--text-dim);
+}
+#pgTrack{
+  flex:0 0 84px;height:3px;border-radius:2px;
+  background:var(--border-strong);overflow:hidden;
+}
+#pgFill{height:100%;width:0%;background:var(--accent);transition:width .1s linear}
+@media(max-width:820px){
+  /* 窄屏收窄：按钮只留图标，进度细条去掉，给章名让位 */
+  .pg-btn .lbl{display:none}
+  #pgTrack{display:none}
+  #pgChapter{max-width:60%}
+}
+#reader{
+  max-width:var(--reader-width);
+  margin:0 auto;
+  /* 底部留白：45vh 是为了"把最后一行滚到顶部"。
+     再 +44px 是因为底部有固定章节条，否则末行会被压在条下面。
+     与移动端那条 `#reader{padding:...45vh}` 覆盖保持一致。 */
+  padding:52px 28px calc(45vh + 44px);
+  font-family:var(--reader-font);
+  font-size:var(--reader-size);
+  line-height:var(--reader-lh);
+  letter-spacing:.012em;
+  color:var(--text);
+  word-break:break-word;
+  overflow-wrap:anywhere;
+  position:relative;                   /* 给下面的 ::before 当定位参照 */
+  /* 字体回退合成：中文加粗在多数系统上依赖浏览器"合成加粗"。
+     不同浏览器 / 不同 CSS 开关下，合成与否会让字宽差出百分之几，
+     整段累积后表现为"有的地方挤、有的地方松"，看起来像排版被拉伸。
+     这里显式锁定合成行为，保证加粗与正文的字宽一致。 */
+  font-synthesis-weight:auto;
+}
+
+/* ============================================================
+   ★ 正文的"毛玻璃文本框"
+
+   三层透明度，别搞混（这是本次需求的核心）：
+     1) 页面背景（body）    —— 拱廊照片 + 86~94% 主题色渐变
+                               = 照片"微微透出来"的那一层
+     2) 这个文本框（::before）—— 80% 不透明的玻璃，压在照片之上
+     3) 正文                —— 完全不透明，压在最上面
+
+   实现用 ::before 而不是真的套一层 <div>：正文节点由 JS 动态生成，
+   加容器要改渲染逻辑、还要照顾导出路径。用伪元素既不动 DOM，
+   也不会影响 #reader 那个 `padding-bottom:45vh`（滚动到底用）。
+
+   ★ 为什么高度要算到 100vh：
+     #reader 本身很高（底部留了 45vh 空白），
+     如果 ::before 只铺 padding-box 或 100%，
+     滚到后面玻璃板就没了、露出照片。所以让它至少铺满一屏。 */
+#reader::before{
+  content:'';
+  position:absolute;
+  /* ★ 这里刻意**不用** z-index:-1。
+     负 z-index 有真实风险：只要 #reader 或任一祖先创建了层叠上下文，
+     伪元素就会沉到 body 背景**之后**，整块玻璃直接看不见（而且不报错、
+     很难查）。所以改成"伪元素留在默认层（z=0），
+     正文各自抬到 z=1"——见下面的 #reader > * 规则。
+     这样无论有没有层叠上下文，玻璃都稳稳在正文下方、背景上方。 */
+  z-index:0;
+  /* 左右各外扩 8px，让玻璃板比文字宽一点，像一张"纸"而不是紧贴文字 */
+  left:-8px;right:-8px;
+  top:-14px;bottom:0;
+  min-height:100vh;
+  border-radius:14px;
+  /* ★ 80% 不透明：用户指定 */
+  background:color-mix(in srgb, var(--bg-elev) 80%, transparent);
+  backdrop-filter:blur(14px) saturate(130%);
+  -webkit-backdrop-filter:blur(14px) saturate(130%);
+  border:1px solid color-mix(in srgb, #fff 30%, transparent);
+  box-shadow:0 8px 40px rgba(20,18,16,.10);
+  pointer-events:none;                  /* 别挡住选字 */
+}
+/* 正文整体抬到玻璃板之上（配合上面 ::before 的 z-index:0）。
+   用 `> *` 而不是给 #reader 本身设 z-index，是为了不把 #reader
+   变成新的层叠上下文容器，保持层级关系简单可预测。 */
+#reader > *{position:relative;z-index:1}
+/* 深色主题：同样的 80%，但底色换成暗色，否则白字对比度不够 */
+html[data-theme="dark"] #reader::before{
+  background:color-mix(in srgb, #1e2024 80%, transparent);
+  border-color:rgba(255,255,255,.09);
+  box-shadow:0 8px 40px rgba(0,0,0,.35);
+}
+/* 默认左对齐。两端对齐(justify)会把每行剩余宽度强行摊到字与字之间，
+   而锚点处字重/字号本就不同，分摊后空隙会格外显眼 —— 这正是
+   "仿生阅读看起来很松散"的主因。汉字等宽，左对齐右边缘已经很整齐。
+   对齐方式只作用在"块"上，绝不改变字距。 */
+#reader p{margin:0 0 var(--reader-para);text-indent:2em;text-align:left}
+html[data-align="justify"] #reader p{text-align:justify;text-align-last:left}
+html[data-align="justify"][data-justify="han"] #reader p{text-justify:inter-ideograph}
+#reader p.no-indent{text-indent:0}
+#reader h1,#reader h2,#reader h3{
+  font-size:1.32em;line-height:1.4;margin:0 0 1.3em;
+  text-align:center;font-weight:700;text-indent:0;
+  letter-spacing:.02em;
+}
+#reader h3{font-size:1.12em;text-align:left;margin-top:1.6em}
+#reader blockquote{
+  margin:0 0 var(--reader-para);padding:.35em 0 .35em 1em;
+  border-left:3px solid var(--border-strong);
+  color:var(--text-dim);text-indent:0;
+}
+#reader .chapter-marker{
+  display:block;text-align:center;color:var(--text-faint);
+  font-size:.72em;letter-spacing:.3em;margin:0 0 2.2em;
+  text-indent:0;font-family:ui-monospace,monospace;
+}
+
+/* --- 仿生阅读核心样式 ---
+
+   ★ 锚点：**永远保持普通内联，不做任何缩放**。
+
+   仿生阅读的机制是"用加粗/变色给出视觉落点"，让眼睛有锚、减少扫视。
+   缩放从来不是这个机制的一部分，却是唯一会破坏排版的属性 —— 已移除。
+
+   历史上试过两种缩放，**两种都错**，留作反面教材：
+
+   1) transform:scale()（必须配 display:inline-block）
+      文档一度声称这是"不影响布局"的完美解法。但它有一个被忽略的前提：
+      transform **对纯内联盒无效**（css-transforms-1 的 transformable
+      element 明确排除 non-replaced inline box），所以想缩放就必须把锚点
+      变成 inline-block。而 inline-block 是**原子盒**，原子盒会
+      **在两侧无条件引入断行机会**（CSSWG 2020-01-24 决议
+      csswg-drafts#4576："Atomic inlines by default always introduce a
+      break opportunity, regardless of context"）。
+      后果：中文段落被塞进大量 UAX#14 本来禁止的断点 → 整段重排、
+      右边缘参差。用户实测：把 display 改回 inline 立刻恢复正常。
+
+   2) font-size 缩放 + 负 margin 收回宽度
+      能保住断行，但宽度补偿稍有偏差就会重现"紧—松—紧—松"的疏密交替
+      （见 接续说明.md 第一节，那个 -0.05em 就是这么来的）。
+      属于用一个易错的手工补偿去换一个非必需的效果，不划算。
+
+   ★ 结论（有规范依据，不要再试图"聪明地"绕开）：
+   **没有任何纯 CSS 办法能同时做到"精确缩放单个字"与"断行与纯文本一致"。**
+   凡 inner type 不是 flow 的 display 值（flow-root / flex / grid）都产生
+   原子盒，必然破坏中文断行；CSSWG 为此设计的 wrap-as 推到 Level 4 后
+   **从未实现**。所以缩放整条路被放弃，而不是换个写法再试。 */
+.br-head{
+  font-weight:var(--head-weight);
+  color:var(--head-color);
+  /* 字号恒等于正文。★ 绝不要试图缩放锚点：
+     想缩放就得用 transform，而 transform 对纯内联无效，
+     于是被迫用 inline-block —— 原子盒会在两侧无条件加断行机会，
+     把中文整段排乱。详见下面"锚点缩放已移除"的完整记录。 */
+  font-size:1em;
+  letter-spacing:inherit;
+  /* 合成加粗补偿：宋体这类没有真 Bold 的字体，浏览器会"合成加粗"，
+     把每个锚点的格子加宽 1.95%（19px 下 +0.371px）。只有这种字体需要补偿，
+     由 measureBoldInflation() 实测决定；有真粗体的字体实测为 0。 */
+  margin-inline-end:var(--head-ls,0px);
+  /* 绝不允许出现任何额外间距 */
+  padding:0;
+  margin-top:0;
+  margin-bottom:0;
+  word-spacing:normal;
+}
+/* ★★★ 锚点缩放已移除（2026-10，用户决定 + 实测确证）★★★
+
+   原来这里有一条 html[data-headzoom="on"] .br-head 规则，
+   在「锚点字号」≠ 100% 时把锚点变成 display:inline-block 以便用
+   transform:scale() 缩放。它有两个致命问题：
+
+   1) 破坏中文排版（用户实测确证）
+      transform 按规范只作用于 block-level / atomic inline-level 元素，
+      对纯内联盒无效（css-transforms-1「transformable element」）。
+      所以想缩放就必须把锚点变成 inline-block —— 而 inline-block 是
+      **原子盒（atomic inline-level box）**（CSS 2.1 §9.2.2：
+      "participate in their inline formatting context as a single opaque box"）。
+
+      原子盒**在两侧无条件引入断行机会**，不看上下文。CSSWG 2020-01-24
+      决议（csswg-drafts#4576）原文：
+        "RESOLVED: Atomic inlines by default always introduce a break
+         opportunity, regardless of context"
+      规范原本写的是"等同于汉字（UAX#14 的 ID 类）"，后因不兼容现有网页
+      被撤销 —— 实测所有浏览器都在原子盒两侧无条件断行。
+
+      于是中文段落被塞进大量 UAX#14 本来**禁止**的断点，
+      整段重排、右边缘参差 —— 就是用户截图里"像对齐出错"的现象。
+      注意：与放大还是缩小**无关**，只与"是否 ≠100%"有关，
+      所以 85%（缩小）和 125%（放大）表现完全一样。
+
+   2) 没有纯 CSS 解法
+      inline flow-root / inline-flex / inline-grid 全都是原子盒，同样失败。
+      CSSWG 为此设计的 wrap-as 被推到 Level 4 后**从未实现**（已废弃）。
+      结论：**没有任何纯 CSS 办法能同时做到"精确缩放"与"断行与纯文本一致"**。
+
+   用户的选择：**放弃缩放**。仿生阅读的核心是"用加粗/变色制造视觉锚点"，
+   缩放从来不是必需属性，却是唯一会破坏排版的那个。
+   现在锚点恒为普通内联（display:inline），排版与纯文本完全一致。 */
+.br-tail{
+  opacity:var(--tail-opacity);
+  color:var(--tail-color,inherit);
+  /* 词尾是"基准"：字距、字重、字号全部与正文一致 */
+  font-weight:400;
+  font-size:1em;
+  letter-spacing:inherit;
+  padding:0;
+  margin:0;
+}
+/* 词尾颜色为「跟随」时，用淡化而非改色 */
+html[data-tail="follow"] .br-tail{color:inherit;opacity:var(--tail-opacity)}
+html[data-tail="custom"] .br-tail{opacity:1;color:var(--tail-color)}
+/* 变色模式 */
+html[data-bionic="color"] .br-head{color:var(--bionic-tint)}
+/* 混合模式：加粗 + 变色 */
+html[data-bionic="mix"] .br-head{font-weight:var(--head-weight);color:var(--bionic-tint)}
+
+/* 阅读进度条 */
+#progress{
+  position:absolute;left:0;bottom:0;height:3px;
+  background:var(--accent);width:0%;
+  transition:width .1s linear;z-index:30;opacity:.75;
+}
+
+/* --- 右侧设置面板 --- */
+#panel{
+  flex:0 0 320px;width:320px;
+  /* 毛玻璃设置面板 */
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border-left:1px solid var(--glass-border);
+  box-shadow:inset 1px 0 0 color-mix(in srgb, #fff 16%, transparent);
+  overflow-y:auto;padding:6px 0 40px;min-height:0;
+  transition:margin-right .22s cubic-bezier(.4,0,.2,1);
+  scrollbar-width:thin;
+  position:relative;z-index:30;
+}
+#panel.hidden{margin-right:-320px}
+.panel-sec{padding:14px 18px;border-bottom:1px solid var(--border)}
+.panel-sec:last-child{border-bottom:none}
+.panel-sec > h3{
+  font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--text-faint);font-weight:700;margin-bottom:11px;
+}
+.field{margin-bottom:15px}
+.field:last-child{margin-bottom:0}
+.field label{
+  display:flex;justify-content:space-between;align-items:baseline;
+  font-size:12.5px;color:var(--text-dim);margin-bottom:7px;
+}
+.field label b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+input[type=range]{
+  width:100%;height:20px;-webkit-appearance:none;appearance:none;
+  background:transparent;cursor:pointer;
+}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--border-strong)}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:15px;height:15px;border-radius:50%;
+  background:var(--accent);margin-top:-5.5px;
+  box-shadow:0 1px 3px rgba(0,0,0,.25);
+}
+input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:var(--border-strong)}
+input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-radius:50%;background:var(--accent)}
+
+.seg{display:flex;gap:5px;flex-wrap:wrap}
+.seg button{
+  flex:1;min-width:0;height:32px;padding:0 6px;border-radius:7px;
+  border:1px solid var(--border);background:var(--bg-sunken);
+  font-size:12.5px;color:var(--text-dim);
+  transition:.12s;white-space:nowrap;
+}
+.seg button:hover{border-color:var(--border-strong);color:var(--text)}
+.seg button.on{
+  background:var(--accent);border-color:var(--accent);
+  color:#fff;font-weight:600;
+}
+.swatches{display:flex;gap:7px;flex-wrap:wrap}
+.swatch{
+  width:30px;height:30px;border-radius:50%;
+  border:2px solid transparent;box-shadow:0 0 0 1px var(--border) inset;
+  transition:transform .12s;
+}
+.swatch:hover{transform:scale(1.12)}
+.swatch.on{border-color:var(--text);box-shadow:0 0 0 1px var(--bg-elev) inset}
+.swatch.follow{
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:600;color:var(--text-dim);
+  background:var(--bg-sunken);
+}
+.picker-row{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-top:11px;font-size:12.5px;color:var(--text-dim);
+}
+.picker-row input[type=color]{
+  width:44px;height:28px;padding:0;border:1px solid var(--border);
+  border-radius:7px;background:var(--bg-sunken);cursor:pointer;
+}
+.picker-row input[type=color]::-webkit-color-swatch-wrapper{padding:2px}
+.picker-row input[type=color]::-webkit-color-swatch{border:none;border-radius:5px}
+.hint{font-size:11.5px;color:var(--text-faint);line-height:1.6;margin-top:9px}
+.hint code{background:var(--bg-sunken);padding:1px 4px;border-radius:3px;font-size:11px}
+
+/* ============================================================
+   3. 空状态 / 拖放 / 加载
+   ============================================================ */
+/* --- 主页（空状态）：穹顶图书馆背景 + 毛玻璃卡片 ---
+   背景图放在 #empty 上（只在没打开书时可见），不干扰阅读区的纯净。
+   玻璃效果靠 backdrop-filter：卡片本身半透明，背后的照片被模糊后透出来。
+   注意两条容易踩的坑：
+     1) backdrop-filter 只会采样**它背后**的内容，所以背景图必须在
+        卡片的祖先或同一层且位于其下方 —— 这里放在 #empty 自己身上。
+     2) 深浅两个主题都要能看清：深色主题把玻璃压暗并加强模糊，
+        浅色主题用白色玻璃 + 轻微降饱和，避免白字压在白墙上。 */
+#empty{
+  position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;
+  /* 竖向留白小一点（窗口矮时卡片不至于顶到边），横向留足 */
+  padding:20px 24px;
+  z-index:20;
+  background-color:var(--bg);
+  background-image:url("bg-library.jpg");
+  background-size:cover;
+  background-position:center 38%;      /* 略偏上，让穹顶成为画面主体 */
+  background-repeat:no-repeat;
+  overflow-y:auto;                     /* 极窄窗口时卡片可滚动，不会被裁掉 */
+}
+/* 照片上的一层柔化遮罩：把背景压向主题色，同时保证卡片有足够对比度。
+   用渐变而不是纯色，保留一点上下的明暗层次，不至于糊成一片。 */
+#empty::before{
+  content:'';position:absolute;inset:0;pointer-events:none;
+  background:
+    radial-gradient(120% 90% at 50% 40%,
+      color-mix(in srgb, var(--bg) 34%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 62%, transparent) 55%,
+      color-mix(in srgb, var(--bg) 82%, transparent) 100%);
+}
+#empty.hidden{display:none}
+/* 卡片要浮在遮罩之上 */
+#empty > *{position:relative;z-index:1}
+
+/* ★ 卡片的竖向节奏（原来是"上紧下松"）：
+     旧值：图标→标题 18 / 标题→说明 9 / 说明→按钮 20 / 按钮→提示 -8(!) / 提示→列表 16
+   问题：
+     1) 标题和说明只隔 9px，挤在一起；
+     2) .fmt-tip 用了 margin-top:-8px 把提示**硬拽**到按钮下方，几乎贴住；
+     3) .fmt-list 上方 22+18=40px，比其它间隙大一倍多，显得"下面空一大块"。
+   现在改成一套统一的间距阶梯（用 --gap 系列便于整体缩放）：
+     图标 →4→ 标题 →10→ 说明 →22→ 按钮 →10→ 提示 →(分隔线)→ 列表 */
+.drop-card{
+  --card-pad:44px;
+  width:min(560px,100%);text-align:center;
+  padding:var(--card-pad) 36px;
+  border-radius:20px;
+  /* 毛玻璃三件套：半透明底 + 背景模糊 + 细高光边 */
+  background:color-mix(in srgb, var(--bg-elev) 62%, transparent);
+  backdrop-filter:blur(22px) saturate(160%);
+  -webkit-backdrop-filter:blur(22px) saturate(160%);
+  border:1px solid color-mix(in srgb, #fff 46%, transparent);
+  /* 双层阴影：贴边的一圈内高光（玻璃厚度感）＋ 外部的落地阴影 */
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 55%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, #000 6%, transparent),
+    0 10px 40px rgba(20,18,16,.22),
+    0 2px 8px rgba(20,18,16,.10);
+  transition:border-color .15s, background .15s, transform .15s, box-shadow .15s;
+}
+.drop-card.over{
+  border-color:var(--accent);
+  background:color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  transform:scale(1.012);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 60%, transparent),
+    0 14px 48px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 2px 8px rgba(20,18,16,.12);
+}
+.drop-card .big{font-size:42px;line-height:1;margin-bottom:4px}
+.drop-card h1{
+  font-size:21px;font-weight:680;letter-spacing:-.01em;
+  line-height:1.4;margin:0 0 10px;
+}
+.drop-card p{
+  font-size:13.5px;color:var(--text-dim);line-height:1.8;
+  margin:0 auto 22px;max-width:42ch;   /* 限宽，避免折行长度不齐 */
+}
+.btn-row{display:flex;gap:9px;justify-content:center;flex-wrap:wrap}
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  height:40px;padding:0 19px;border-radius:9px;
+  font-size:13.5px;font-weight:600;
+  background:var(--accent);color:#fff;
+  transition:.13s;box-shadow:0 1px 2px rgba(0,0,0,.14);
+  border:1px solid transparent;
+}
+.btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+/* 次按钮也是玻璃：与卡片同材质，只是更淡 */
+.btn.ghost{
+  background:color-mix(in srgb, var(--bg-elev) 34%, transparent);
+  color:var(--text-dim);
+  border:1px solid color-mix(in srgb, #fff 40%, var(--border));
+  backdrop-filter:blur(10px) saturate(140%);
+  -webkit-backdrop-filter:blur(10px) saturate(140%);
+  box-shadow:inset 0 1px 0 color-mix(in srgb, #fff 42%, transparent);
+}
+.btn.ghost:hover{
+  color:var(--text);
+  border-color:color-mix(in srgb, #fff 60%, var(--border-strong));
+  background:color-mix(in srgb, var(--bg-elev) 52%, transparent);
+}
+/* 提示：原来用负 margin 硬拽，现在给正常的 10px 间距 */
+.fmt-tip{
+  font-size:11.5px;color:var(--text-faint);
+  line-height:1.65;margin:10px auto 0;max-width:40ch;
+}
+.fmt-list{
+  display:flex;gap:16px;justify-content:center;flex-wrap:wrap;
+  margin-top:20px;padding-top:18px;
+  border-top:1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.fmt-list div{font-size:11.5px;color:var(--text-faint);line-height:1.65}
+.fmt-list b{display:block;color:var(--text-dim);font-size:12px;font-weight:600;margin-bottom:3px}
+
+/* 深色主题：照片偏亮，压暗玻璃并加强模糊，否则白字浮在亮墙上读不清 */
+html[data-theme="dark"] #empty::before{
+  background:
+    radial-gradient(120% 90% at 50% 40%,
+      rgba(10,11,13,.62) 0%,
+      rgba(10,11,13,.74) 55%,
+      rgba(10,11,13,.86) 100%);
+}
+/* 深色主题下的阅读区背景已上移到 body 附近，
+   由 html[data-bg="image"][data-theme="dark"] 统一处理（避免两处规则打架） */
+html[data-theme="dark"] .drop-card{
+  background:rgba(28,30,35,.52);
+  border-color:rgba(255,255,255,.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.10),
+    0 12px 44px rgba(0,0,0,.50);
+}
+html[data-theme="dark"] .btn.ghost{
+  background:rgba(255,255,255,.07);
+  border-color:rgba(255,255,255,.14);
+}
+html[data-theme="dark"] .btn.ghost:hover{
+  background:rgba(255,255,255,.12);
+  border-color:rgba(255,255,255,.24);
+}
+/* 不支持 backdrop-filter 的浏览器（老 Firefox / 部分嵌入式）：
+   退回不透明底色，保证文字可读 —— 宁可没有玻璃感，也不要看不清 */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .drop-card{background:color-mix(in srgb, var(--bg-elev) 92%, transparent)}
+  .btn.ghost{background:var(--bg-elev)}
+}
+
+/* 加载遮罩：同样用玻璃，与主页保持一致的材质语言 */
+#loading{
+  position:absolute;inset:0;z-index:50;
+  display:none;flex-direction:column;
+  align-items:center;justify-content:center;gap:15px;
+  background:color-mix(in srgb, var(--bg) 62%, transparent);
+  backdrop-filter:blur(18px) saturate(150%);
+  -webkit-backdrop-filter:blur(18px) saturate(150%);
+}
+#loading.on{display:flex}
+.spinner{
+  width:32px;height:32px;border-radius:50%;
+  border:3px solid var(--border-strong);border-top-color:var(--accent);
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loadingText{font-size:13px;color:var(--text-dim)}
+
+/* 全屏拖放遮罩 */
+#dropOverlay{
+  position:fixed;inset:0;z-index:100;display:none;
+  align-items:center;justify-content:center;
+  background:color-mix(in srgb, var(--accent) 14%, transparent);
+  backdrop-filter:blur(10px) saturate(150%);
+  -webkit-backdrop-filter:blur(10px) saturate(150%);
+  border:4px dashed var(--accent);
+}
+#dropOverlay.on{display:flex}
+#dropOverlay span{
+  font-size:19px;font-weight:650;color:var(--accent);
+  padding:16px 30px;border-radius:14px;
+  /* 提示牌也用玻璃，与主页卡片同材质 */
+  background:color-mix(in srgb, var(--bg-elev) 68%, transparent);
+  backdrop-filter:blur(16px) saturate(160%);
+  -webkit-backdrop-filter:blur(16px) saturate(160%);
+  border:1px solid color-mix(in srgb, #fff 44%, transparent);
+  box-shadow:0 12px 40px rgba(20,18,16,.24);
+}
+
+/* Toast */
+#toast{
+  position:fixed;bottom:26px;left:50%;transform:translate(-50%,80px);
+  /* 毛玻璃提示条。深色主题下 --text 很亮、--bg-elev 很暗，
+     直接用会变成"亮底暗字"的实心块，与整体玻璃感不搭；
+     所以这里用玻璃底 + 强调色描边，深浅主题都成立。 */
+  background:var(--glass-bg-strong);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  color:var(--text);
+  border:1px solid var(--glass-border);
+  padding:11px 19px;border-radius:11px;font-size:13px;font-weight:500;
+  box-shadow:0 10px 34px rgba(20,18,16,.26);z-index:200;
+  opacity:0;transition:.25s cubic-bezier(.4,0,.2,1);pointer-events:none;
+  max-width:88vw;text-align:center;
+}
+#toast.on{transform:translate(-50%,0);opacity:1}
+
+/* 移动端适配 */
+#backdrop{display:none;position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:35}
+@media(max-width:1080px){
+  #panel{position:absolute;right:0;top:0;bottom:0;z-index:38;box-shadow:var(--shadow-lg)}
+  #panel.hidden{margin-right:0;transform:translateX(100%)}
+  #panel{transition:transform .22s cubic-bezier(.4,0,.2,1)}
+}
+@media(max-width:820px){
+  #sidebar{position:absolute;left:0;top:0;bottom:0;z-index:38;box-shadow:var(--shadow-lg);width:82vw;flex-basis:82vw}
+  #sidebar.hidden{margin-left:0;transform:translateX(-100%)}
+  #sidebar{transition:transform .22s cubic-bezier(.4,0,.2,1)}
+  #backdrop.on{display:block}
+  #bookTitle{display:none}
+  .tb-btn .lbl{display:none}
+  .tb-btn kbd{display:none}
+  #reader{padding:32px 20px calc(45vh + 44px)}
+  .brand .txt{display:none}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ========== 顶栏 ========== -->
+  <header id="topbar">
+    <button class="tb-btn icon" id="btnSidebar" title="目录 (S)" aria-label="切换目录">☰</button>
+    <button class="brand" id="btnBrand" title="回到首页" style="cursor:pointer"><span class="dot"></span><span class="txt">Bionic Reader</span></button>
+    <div id="bookTitle">未打开书籍</div>
+    <div class="tb-group">
+      <button class="tb-btn" id="btnHome" title="换一本书 / 回到首页 (H)" hidden>
+        <span class="home-ico">⌂</span><span>换一本</span>
+      </button>
+      <button class="tb-btn" id="btnBionic" title="仿生阅读开关 (B)">
+        <span>仿生</span><kbd>B</kbd>
+      </button>
+      <button class="tb-btn icon" id="btnTheme" title="切换主题 (T)">◐</button>
+      <button class="tb-btn icon" id="btnPanel" title="设置 (P)">⚙</button>
+    </div>
+  </header>
+
+  <!-- ========== 主体 ========== -->
+  <div id="main">
+
+    <!-- 目录 -->
+    <aside id="sidebar" class="hidden">
+      <div class="side-head">
+        <h2>目录</h2>
+        <button class="tb-btn icon" id="btnCloseSide" title="收起">✕</button>
+      </div>
+      <input id="tocSearch" type="search" placeholder="搜索章节…" autocomplete="off">
+      <nav id="tocList"></nav>
+    </aside>
+
+    <!-- 阅读区 -->
+    <section id="stage">
+      <div id="scroller"><article id="reader"></article></div>
+      <div id="progress"></div>
+
+      <!-- 底部章节条（打开书后才显示）
+           只有"上一章 / 下一章"两个动作 —— 章内滚动交给滚轮/滚动条，
+           不需要额外的"翻屏"按钮。 -->
+      <div id="pager" class="hidden">
+        <button class="pg-btn" id="pgPrevCh" title="上一章 (← / PgUp)">
+          <span>⏮</span><span class="lbl">上一章</span>
+        </button>
+        <div id="pgInfo">
+          <span id="pgChapter"></span>
+          <span id="pgCount"></span>
+          <span id="pgTrack"><span id="pgFill"></span></span>
+        </div>
+        <button class="pg-btn" id="pgNextCh" title="下一章 (→ / 空格 / PgDn)">
+          <span class="lbl">下一章</span><span>⏭</span>
+        </button>
+      </div>
+
+      <!-- 空状态 -->
+      <div id="empty">
+        <div class="drop-card" id="dropCard">
+          <div class="big">📖</div>
+          <h1>导入一本书，开始仿生阅读</h1>
+          <p>把 <b>EPUB</b> 或 <b>TXT</b> 文件拖到这里，或者点击下面的按钮选择。<br>全部在本机解析，不会上传到任何服务器。</p>
+          <div class="btn-row">
+            <button class="btn" id="btnPick">选择文件</button>
+            <button class="btn ghost" id="btnDemo">看示例文本</button>
+          </div>
+          <p class="fmt-tip">点击「选择文件」后会弹出系统文件框；如果屏幕没有变化，请检查浏览器窗口是否被遮挡。</p>
+          <div class="fmt-list">
+            <div><b>EPUB</b>按章节解析<br>支持目录与封面</div>
+            <div><b>TXT</b>自动识别 GBK<br>按章节标题切分</div>
+            <div><b>隐私</b>纯本地处理<br>无网络请求</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 加载 -->
+      <div id="loading">
+        <div class="spinner"></div>
+        <div id="loadingText">正在解析…</div>
+      </div>
+    </section>
+
+    <!-- 设置面板 -->
+    <aside id="panel" class="hidden">
+      <div class="panel-sec">
+        <h3>仿生阅读</h3>
+        <div class="field">
+          <label>首字母高亮方式</label>
+          <div class="seg" id="segMode">
+            <button data-mode="bold">加粗</button>
+            <button data-mode="color">变色</button>
+            <button data-mode="mix">加粗+变色</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>高亮强度 <b id="vStrength">中</b></label>
+          <input type="range" id="rStrength" min="1" max="5" step="1" value="3">
+          <div class="hint">控制单词开头被高亮的字母数量。太长会显得断续，太短则失去锚定作用。</div>
+        </div>
+        <div class="field">
+          <label>词尾淡化 <b id="vTail">50%</b></label>
+          <input type="range" id="rTail" min="10" max="100" step="5" value="50">
+        </div>
+        <div class="field">
+          <label>高亮色</label>
+          <div class="swatches" id="swatches"></div>
+          <label class="picker-row">
+            <span>自定义颜色</span>
+            <input type="color" id="tintPicker" value="#b4531f">
+          </label>
+          <div class="swatches" id="tailSwatches" style="margin-top:10px"></div>
+          <label class="picker-row">
+            <span>自定义词尾色</span>
+            <input type="color" id="tailPicker" value="#6b6862">
+          </label>
+          <div class="hint">第一排是<b>锚点（首字母）</b>颜色，第二排是<b>词尾</b>颜色。选「跟随」时词尾只做淡化处理。</div>
+        </div>
+      </div>
+
+      <div class="panel-sec">
+        <h3>排版</h3>
+        <div class="field">
+          <label>正文字号 <b id="vSize">19px</b></label>
+          <input type="range" id="rSize" min="14" max="48" step="1" value="19">
+          <div class="hint">整个正文的字号。锚点与正文同号：缩放会破坏中文断行，故不提供。</div>
+        </div>
+        <div class="field">
+          <label>行高 <b id="vLh">1.9</b></label>
+          <input type="range" id="rLh" min="12" max="26" step="1" value="19">
+        </div>
+        <div class="field">
+          <label>段间距 <b id="vPara">1.1em</b></label>
+          <input type="range" id="rPara" min="0" max="24" step="1" value="11">
+        </div>
+        <div class="field">
+          <label>每行宽度 <b id="vWidth">34字</b></label>
+          <input type="range" id="rWidth" min="20" max="64" step="2" value="34">
+          <div class="hint">中文建议 30–38 字/行，过宽会导致跳行。</div>
+        </div>
+        <div class="field">
+          <label>对齐方式</label>
+          <div class="seg" id="segAlign">
+            <button data-align="left">左对齐</button>
+            <button data-align="justify">两端对齐</button>
+          </div>
+          <div class="hint">当前生效：<b id="alignNow">左对齐</b>。两端对齐会把每行的剩余宽度摊到字与字（英文则是词与词）之间，看起来就是"被撑出一段空白"；<b>左对齐字距最稳</b>，推荐配合仿生阅读使用。</div>
+        </div>
+        <div class="field">
+          <label>字体</label>
+          <div class="seg" id="segFont">
+            <button data-font="serif">宋体</button>
+            <button data-font="kai">楷体</button>
+            <button data-font="sans">黑体</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>主题</label>
+          <div class="seg" id="segTheme">
+            <button data-theme="light">亮色</button>
+            <button data-theme="sepia">护眼</button>
+            <button data-theme="dark">暗色</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>阅读背景</label>
+          <div class="seg" id="segBg">
+            <button data-bg="plain">纯色</button>
+            <button data-bg="image">背景图</button>
+          </div>
+          <div class="hint">纯色最省电、对比最稳；背景图会在正文下铺一层建筑照片，正文另有一块 80% 不透明的玻璃板保证可读。</div>
+        </div>
+      </div>
+
+      <div class="panel-sec">
+        <h3>操作</h3>
+        <div class="seg" style="margin-bottom:9px">
+          <button id="btnHome2">打开另一本书</button>
+        </div>
+        <div class="seg" style="margin-bottom:11px">
+          <button id="btnExport">导出 HTML</button>
+          <button id="btnReset">恢复默认</button>
+        </div>
+        <div class="hint">
+          快捷键：<code>B</code> 仿生 · <code>T</code> 主题 · <code>P</code> 设置 · <code>S</code> 目录 ·
+          <code>H</code> 换一本 · <code>Esc</code> 关闭面板<br>
+          翻章：<code>← →</code> / <code>↑ ↓</code> / <code>空格</code> / <code>PgUp PgDn</code> ·
+          <code>Home</code>/<code>End</code> 章首/章末
+        </div>
+      </div>
+    </aside>
+
+    <div id="backdrop"></div>
+  </div>
+</div>
+
+<!-- 全屏拖放提示 -->
+<div id="dropOverlay"><span>松手即导入 📥</span></div>
+<div id="toast"></div>
+<input type="file" id="fileInput" accept=".epub,.txt,text/plain,application/epub+zip" hidden>
+
+<!-- JSZip：仅用于解析 EPUB，延迟加载 -->
+<script>
+/* ============================================================
+   Bionic Reader — 单文件离线阅读器
+   作者：可自由修改与分发
+   ============================================================ */
+(() => {
+'use strict';
+
+/* ---------- 0. 工具 ---------- */
+const $  = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+let toastTimer;
+function toast(msg, ms = 2600) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('on'), ms);
+}
+function setLoading(on, text = '正在解析…') {
+  $('#loadingText').textContent = text;
+  $('#loading').classList.toggle('on', on);
+}
+const fmtSize = n => n < 1024 * 1024
+  ? (n / 1024).toFixed(0) + ' KB'
+  : (n / 1024 / 1024).toFixed(2) + ' MB';
+const yieldToUI = () => new Promise(r => setTimeout(r, 0));
+
+/* ============================================================
+   1. 仿生阅读核心算法
+   ============================================================ */
+
+/* 强度 → 各长度单词取几个字母
+   数组下标 i 对应单词长度 (i+1)，索引 0..9 即长度 1..10，长度 >10 一律用索引 9。
+   数值经手调：短词取 1 个字母，长词最多取 4 个，保证长词后半段仍可辨认。 */
+const STRENGTH_TABLE = {
+  1: [1,1,1,1,1,1,1,1,1,2],
+  2: [1,1,1,1,1,1,2,2,2,3],
+  3: [1,1,1,1,2,2,2,3,3,4],
+  4: [1,1,1,2,2,2,3,3,4,4],
+  5: [1,1,2,2,3,3,3,4,4,5],
+};
+const STRENGTH_NAME = { 1:'最弱', 2:'弱', 3:'中', 4:'强', 5:'最强' };
+
+function prefixLen(word, strength) {
+  const table = STRENGTH_TABLE[strength] || STRENGTH_TABLE[3];
+  const i = Math.min(word.length, 10) - 1;      // 长度 1..10 → 下标 0..9
+  const want = table[Math.max(0, i)];
+  // 安全上限：长度 >3 的词至少保留 1 个字母作为尾巴，避免整个词被高亮而失去锚定对比
+  const cap = word.length > 3 ? word.length - 1 : word.length;
+  return Math.max(1, Math.min(want, cap));
+}
+
+/* 匹配一段"词"：拉丁字母/数字连写算一个词；汉字按字计算（中文无空格分词）。
+   用 \p{Script=Han} 精确识别汉字，避免把日文假名、韩文误判。 */
+const WORD_RE = /([\p{Script=Han}]+|[\p{L}\p{N}]+)/gu;
+const HAN_RE = /^\p{Script=Han}+$/u;
+
+/* 中文句读标点：这些符号之后是天然的分句起点，最适合放锚点。
+   包含中英文标点与常见全角符号。 */
+const CJK_PUNCT = '。！？；：，、…—～·「」『』（）〔〕【】《》〈〉“”‘’';
+const PUNCT_SET = new Set([...CJK_PUNCT, '.', '!', '?', ';', ':', ',', '"', "'", ')', ']', '}']);
+
+/* 引号 / 括号这类"包裹型"标点。它们单独出现时**不构成**分句起点：
+   「“枯枝败叶”」如果在前引号后也打锚点，就会变成【“】【枯】枝败叶【”】，
+   后半的【”】是空锚点，把词义切碎。 */
+const CJK_QUOTE = '「」『』（）〔〕【】《》〈〉“”‘’';
+const QUOTE_SET = new Set([...CJK_QUOTE, '(', '[', '{']);
+
+/* 中文锚点策略（现行）—— 用"语义小句"代替"兜底等距"。
+
+   中文没有空格，所以"词"的边界本来就是靠标点和虚词透出来的。
+   一个可读的语义小句大致结构是：
+
+       起点(可能含虚词) → 内容段(约 N 字，实词在这里) → 虚词尾
+
+   于是真正值得锚定的位置有且只有两个：
+       1) 小句第一个字  —— 视线落点
+       2) 内容段的第一个字 —— 小句太长时，在实词处补一次落点
+
+   这条规则天然避免了两个极端：
+     · 不会把「的」「了」这类虚词当成锚点（旧版按固定间隔兜底就会）
+     · 不会在一长串没有标点的汉字里机械等距打点
+
+   关键不变式：**虚词永不作锚点**，所以一小句里最多只有
+   「起点 + 一个实词」两个锚点，且两者必然相隔 2 个字以上 ——
+   这从结构上保证了"锚点之间不会挤在一起"，也就不会有字距问题。 */
+const CJK_CLAUSE = [18, 14, 12, 10, 8];   // 内容段长度，下标 = 强度-1
+
+/* 单个虚词：这些字单独出现时不承载词义，作锚点等于把词拦腰截断。
+   注意**不含**人称代词（我/你/他/她/它）与「这/那/是」——
+   它们作主语/指示时是实词，而且往往正是小句该被锚定的第一个字
+   （「这是那场…」锚「这」）。把「是」排除在外还有个副作用：
+   「价格是 100 元」里的「元」是独立区段的首字，若「是」被跳过，
+   这个区段就会从「元」开始，把量词错锚成锚点。 */
+const CJK_FUNC_1 = new Set([
+  ...[...'的了着过地得吗呢吧啊呀哦嗯哇啦嘛'],
+  ...[...'之乎者也矣焉哉'],
+  ...[...'和与及或而则并且但却'],
+  ...[...'就都也还又才只更很太最'],
+  ...[...'来去起见'],
+  ...[...'所被给让'],
+]);
+
+/* 双字虚词 / 连词：命中后整个跳过（2 字）。 */
+const CJK_FUNC_2 = new Set([
+  '因为', '所以', '但是', '如果', '虽然', '而且', '并且', '以及',
+  '于是', '然后', '由于', '为了', '关于', '对于', '通过', '根据',
+  '不会', '不能', '没有', '一个', '一种', '一样', '这个', '那个',
+  '这些', '那些', '什么', '怎么', '已经', '还是', '就是', '只是',
+]);
+
+/* 只在小句**开头**起连接作用的词。小句起点永远锚定第一个字，
+   唯一的例外是这类连词 —— 「但是我」「而且他」锚「我」「他」更贴词义，
+   锚在连词上等于浪费了一个锚点。
+   注意只有真正"句首连词"才在表里：「最」「这」「是」不是连词，
+   它们是内容的一部分（「最后一句」「这是那场」），必须锚。
+   锚点必须落在小句的第一个字上，否则整段的视觉落点节奏就乱了。 */
+const CJK_LEAD_CONJ = new Set([...'但并而且或则因所即若虽']);
+
+/* 补位点必须避开的字。补位锚点如果落在这些字上，等于把词拦腰截断
+   （「物」质垃圾、「遗」物、「瓦」砾、"越"来越…），比不锚还糟。
+   注意：这张表**只约束补位**，不约束小句起点 ——
+   起点锚在小句开头，天然就是词的开头，不存在截断问题。 */
+const CJK_AVOID_TAIL = new Set([...'物是越有里是使证效']);
+
+/* 常见的**单字实词**。分词器会把「个」「这」「被」「先」「或」「把」这类
+   功能字也切成独立的单字词，它们看着像"词"，锚上去却只是噪音。
+   而「人」「天」「说」「走」这类单字实词是值得锚的，不能一刀切掉所有单字词。
+
+   所以：**单字词只有落在这张白名单里才是候选**。
+   多字词不受此限（分词器给出多字词本身就说明它是个实词单位）。
+
+   这张表宁缺毋滥：漏掉几个单字实词，只是少一个锚点；
+   混进功能字，则是每个都多一个无意义的加粗。 */
+const CJK_CONTENT_1 = new Set([
+  ...[...'人天年月日时分秒'],
+  ...[...'说看想问走跑飞站坐卧哭笑'],
+  ...[...'吃喝穿住买卖用做作拿放给送'],
+  ...[...'心手眼耳口鼻头身足力气血'],
+  ...[...'山水火土金石木草花鸟鱼虫'],
+  ...[...'国城家村路桥门车船'],
+  ...[...'书字画歌诗词文章句'],
+  ...[...'真爱恨怒喜悲苦乐'],
+  ...[...'生死老病'],
+  ...[...'一二三四五六七八九十百千万亿'],
+]);
+
+/* 判断以 run[off] 开头的这段汉字是否符合"虚词开头"。
+   返回应跳过的字数（0 表示适合作锚点）。 */
+function _funcSkip(run, off) {
+  const rest = run.slice(off);
+  if (rest.length >= 2 && CJK_FUNC_2.has(rest.slice(0, 2))) return 2;
+  if (CJK_FUNC_1.has(run[off])) return 1;
+  return 0;
+}
+
+/* 补位点是否可接受：既不能是虚词，也不能落在"半个词"的尾字上。
+   （连排加粗的约束由 computeHanAnchors 里的 lastOff 统一把关。） */
+
+/* 上一版用的是"距上一个锚点超过 N 个汉字就补一个"的等距兜底，
+   现已被语义小句切分取代。保留此表仅供测试与文档引用。 */
+const CJK_STRIDE = { 1: 11, 2: 9, 3: 7, 4: 6, 5: 5 };
+
+/* 判断某个汉字区段是否"接着分句标点 / 段首"——
+   即它是新小句的开始。引号与括号被跳过：它们只圈住内容，不改变分句。 */
+function _isClauseStart(text, s) {
+  if (s === 0) return true;
+  let j = s - 1;
+  if (/[ \t\u3000\u00a0\n\r]/.test(text[j])) return true;
+  while (j >= 0 && QUOTE_SET.has(text[j])) j--;
+  return j >= 0 && PUNCT_SET.has(text[j]);
+}
+
+/* 计算段落里所有"汉字区段"（连续汉字的最长串）的 [起点, 终点) 区间。
+   标点、字母、数字、空白都会切断区段。 */
+function hanRuns(text) {
+  const runs = [];
+  let s = -1;
+  for (let i = 0; i < text.length; i++) {
+    const isHan = /[\p{Script=Han}]/u.test(text[i]);
+    if (isHan) { if (s < 0) s = i; }
+    else if (s >= 0) { runs.push([s, i]); s = -1; }
+  }
+  if (s >= 0) runs.push([s, text.length]);
+  return runs;
+}
+
+/* ============================================================
+   ★ 中文分词（用于"句中词语锚点"）
+
+   中文没有空格，靠标点只能切出小句，切不出"词"。
+   要在句中按**词**下锚点（引导 / 提升 / 阅读 …），必须有真正的分词。
+
+   用浏览器内置的 Intl.Segmenter(locale, {granularity:'word'})：
+     - 零依赖、离线可用（本应用是单文件阅读器，不能引外部词典）
+     - 已进入 Baseline（2024-04），Chrome/Edge 87+、Firefox 125+、Safari 14.1+
+     - 规范明确覆盖中文/日文等不用空格分词的语言
+
+   实测效果（zh，granularity:'word'）：
+     仿生阅读是一种通过视觉引导提升阅读效率的排版方式
+     → 仿生 | 阅读 | 是 | 一种 | 通过 | 视觉 | 引导 | 提升 | 阅读 | 效率 | 的 | 排版 | 方式
+
+   ★ 降级策略：拿不到 Segmenter（老浏览器）时返回 null，
+     调用方**退回"只锚标点后首字"**的旧行为 —— 功能缺失但不报错。
+   这是刻意的 fail-soft：分词只是锦上添花，不该让整个阅读器挂掉。
+   ============================================================ */
+let _segmenter, _segmenterReady = false;
+function getSegmenter() {
+  if (_segmenterReady) return _segmenter;
+  _segmenterReady = true;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      _segmenter = new Intl.Segmenter('zh-Hans', { granularity: 'word' });
+    }
+  } catch (e) { _segmenter = null; }   // 构造失败也当作不支持
+  return _segmenter;
+}
+
+/* 把一段文本切成词，返回 [{text, start, end}]。start/end 相对传入文本。
+   拿不到 Segmenter 时返回 null。 */
+function segmentWords(text) {
+  const seg = getSegmenter();
+  if (!seg) return null;
+  try {
+    const out = [];
+    for (const s of seg.segment(text)) {
+      out.push({ text: s.segment, start: s.index, end: s.index + s.segment.length });
+    }
+    return out;
+  } catch (e) { return null; }
+}
+
+/* 每个强度对应的"句中词锚点"密度：数值 = 目标间隔（字）。
+   数值越小越密。强度越高越密 —— 这样强度滑块对中文重新有了意义。
+
+   ★ 用**数组**而不是对象：下标就是 strength-1，
+     以前这里写成对象 {1:5,2:4,...} 却用 [strength-1] 取值，
+     强度 1 取到 [0] → undefined → wantGap 变成 NaN，
+     而 `gap < NaN` 恒为 false → **所有候选词全被选中**，
+     整句连成一片加粗。数组下标天然对齐，不会再犯。 */
+const WORD_ANCHOR_GAP = [10, 8, 6, 5, 4];   // 下标 = 强度-1
+
+/* 相邻锚点最小间隔（字）。从结构上保证锚点不会挤在一起 → 不会有字距问题。 */
+const MIN_ANCHOR_GAP = 4;
+
+/* 计算一段纯文本中，哪些字符位置是"锚点起点"。返回 Set，元素为字符下标。
+
+   ★ 规则（2026-10 用户指定）：
+
+     **两类锚点：**
+       1) 结构锚点：每个标点符号之后的第一个字 + 每段的第一个字
+       2) 词语锚点：句中**词**的首字（需要分词，见 segmentWords）
+
+     结构锚点保证每个小句都有视觉入口；词语锚点让小句内部也有落点，
+     视线不会在小句中间"滑走"。
+
+   ★ 词语锚点的约束（避免又变回以前那种零碎感）：
+     a) 只锚**实词**，虚词（的/了/和/是…）永远不锚
+        —— 锚在虚词上不提示任何信息，等于浪费一个加粗
+     b) 与上一个锚点至少隔开 MIN_ANCHOR_GAP 个字
+     c) 密度由强度控制（见 WORD_ANCHOR_STRIDE）
+
+   ★ 返回值是 Map<起点, 长度>（不是 Set）：
+     · 结构锚点长度恒为 1 —— 句首只要一个字做视线落点
+     · 词语锚点长度 = 整个词长 —— 词是内容单位，整词加粗才完整
+       （只粗首字会把「引导」切成「【引】导」，像断字） */
+function computeHanAnchors(text, strength) {
+  const anchors = new Map();
+
+  /* --- 第一遍：结构锚点（标点后首字 / 段首首字），长度恒为 1 --- */
+  for (const [s] of hanRuns(text)) {
+    if (!_isClauseStart(text, s)) continue;
+    const run = text.slice(s);
+    // ★ 句首跳过：**只跳真正的句首连词**，不是所有虚词。
+    //     「最」「这」「是」虽是虚词，但它们是内容的一部分：
+    //     「最后一句」必须锚「最」、「这是那场」必须锚「这」。
+    //     所以只用 CJK_LEAD_CONJ（但/并/而/且/或…），不要用 _funcSkip。
+    let off = 0;
+    if (run.length > 1 && CJK_LEAD_CONJ.has(run[0]) && !CJK_FUNC_1.has(run[1])) off = 1;
+    anchors.set(s + off, 1);            // 长度 1：句首只粗一个字
+  }
+
+  /* --- 第二遍：词语锚点，长度为整个词 --- */
+  const words = segmentWords(text);
+  // 拿不到分词器就到此为止（退回"只锚标点后首字"）
+  if (!words) return anchors;
+
+  /* 目标间隔（字）：直接查表，下标 = 强度-1。
+     ★ 必须防 NaN：`gap < NaN` 恒为 false，会让**所有**候选词通过，
+       整段连成一片加粗（曾经就是这么错的）。
+       这里用 `| 0` 兜底并把下标夹在 [0,4]，取不到就退回最疏的 10。 */
+  const gi = Math.min(Math.max((strength | 0) - 1, 0), WORD_ANCHOR_GAP.length - 1);
+  const wantGap = WORD_ANCHOR_GAP[gi] ?? 10;
+  if (!(wantGap > 0)) return anchors;    // 理论上不可达；真出现就退回只锚结构点
+
+  /* 候选：只收**实词**。
+     ★ 关键：必须排除「单字词」中不承载信息的那些。
+       分词器会把「个」「这」「被」「先」「或」「把」都切成独立的单字词，
+       它们看着像"词"，其实是功能字 —— 锚上去只会制造噪音加粗。
+       而单字实词（人/天/说/走…）是值得锚的，所以不能一刀切掉所有单字词。
+     判据：单字词必须在「常见单字实词」白名单里才算候选。 */
+  const cands = [];
+  for (const w of words) {
+    if (!HAN_RE.test(w.text)) continue;                    // 拉丁词走 prefixLen
+    if (CJK_FUNC_1.has(w.text[0])) continue;               // 虚词打头，不锚
+    if (w.text.length >= 2 && CJK_FUNC_2.has(w.text.slice(0, 2))) continue;
+    // 单字词：必须是白名单里的实词才收
+    if (w.text.length === 1 && !CJK_CONTENT_1.has(w.text)) continue;
+    // 与结构锚点重合 → 不要重复（结构锚点只粗 1 字，语义上已经够了）
+    if (anchors.has(w.start)) continue;
+    cands.push({ start: w.start, len: w.text.length });
+  }
+
+  /* 贪心挑选：从左到右扫描，只要与**所有**已选锚点区间都拉开 wantGap 就选中。
+     注意要按**区间**比较（用词的末尾去比下一个词的起点），
+     否则「引导」(11~13) 与紧随的「提升」(13~15) 会被判成"距离 2"而同时选中，
+     看着就是连成一片的加粗。 */
+  for (const { start, len } of cands) {
+    let ok = true;
+    for (const [s, l] of anchors) {
+      const gap = Math.max(s - (start + len), start - (s + l));
+      if (gap < wantGap) { ok = false; break; }
+    }
+    if (ok) anchors.set(start, len);       // 长度 = 词长 → 整个词一起加粗
+  }
+
+  return anchors;
+}
+
+/* 把一段汉字按"锚点区间"切成 head/tail 片段序列。
+   返回 [[文本, 是否锚点], ...]，相邻同类会被合并。
+
+   anchors 是 Map<起点, 长度>（不是 Set）：
+     · 结构锚点（标点后首字 / 段首首字）长度恒为 1
+       —— 句首只需要一个字做视线落点
+     · 词语锚点长度为**整个词长**
+       —— 词是内容单位，整个词一起加粗才完整；
+          只粗首字会把「引导」切成「【引】导」，看着像断字
+
+   ★ 为什么不担心"整句加粗"：
+     被加粗的只有"被选中的词"，词与词之间不连续，
+     所以永远是"某几个词粗、其余正常"的节奏，不会连成一片。 */
+function splitHanRun(run, startIndex, anchors) {
+  // 先把本区段内的锚点区间收成 [start, end) 列表（相对本区段），便于顺序扫描
+  const spans = [];
+  for (const [start, len] of anchors) {
+    const s = start - startIndex;
+    if (s >= -7 && s < run.length + 7) spans.push([s, s + len]);
+  }
+  spans.sort((a, b) => a[0] - b[0]);
+
+  const out = [];
+  let si = 0;
+  for (let i = 0; i < run.length; i++) {
+    // 推进到可能覆盖 i 的区间
+    while (si < spans.length && spans[si][1] <= i) si++;
+    const isHead = si < spans.length && spans[si][0] <= i && i < spans[si][1];
+    const ch = run[i];
+    const lastSeg = out[out.length - 1];
+    if (lastSeg && lastSeg[1] === isHead) lastSeg[0] += ch;
+    else out.push([ch, isHead]);
+  }
+  return out;
+}
+
+/* 逐个文本片段处理：把纯文本拆成 head/tail 两种 span */
+function bionicFragment(text, strength, doc) {
+  const frag = doc.createDocumentFragment();
+  let last = 0;
+  WORD_RE.lastIndex = 0;
+  let m;
+  // 锚点位置基于整段文本一次性算出（需要标点上下文，不能逐词判断）
+  const anchors = computeHanAnchors(text, strength);
+
+  const pushHead = (s, isHead) => {
+    if (!s) return;
+    const el = doc.createElement('span');
+    el.className = isHead ? 'br-head' : 'br-tail';
+    el.textContent = s;
+    frag.appendChild(el);
+  };
+
+  while ((m = WORD_RE.exec(text)) !== null) {
+    if (m.index > last) frag.appendChild(doc.createTextNode(text.slice(last, m.index)));
+    const run = m[0];
+
+    if (HAN_RE.test(run)) {
+      // 中文：锚点由整段文本的标点上下文决定（见 computeHanAnchors）
+      for (const [seg, isHead] of splitHanRun(run, m.index, anchors)) {
+        pushHead(seg, isHead);
+      }
+    } else {
+      // 拉丁/数字：按长度取前缀
+      const n = prefixLen(run, strength);
+      pushHead(run.slice(0, n), true);
+      pushHead(run.slice(n), false);
+    }
+    last = m.index + run.length;
+  }
+  if (last < text.length) frag.appendChild(doc.createTextNode(text.slice(last)));
+  return frag;
+}
+
+/* 把一段文本转成 HTML 字符串（与 bionicFragment 同源，
+   保证"屏幕上看到的"和"导出的"完全一致）。
+   escape 由调用方通过 esc 传入，避免两处转义规则漂移。 */
+function bionicToHTML(text, strength, esc) {
+  let out = '';
+  let last = 0;
+  WORD_RE.lastIndex = 0;
+  let m;
+  const anchors = computeHanAnchors(text, strength);
+  const head = s => `<span class="br-head">${esc(s)}</span>`;
+  const tail = s => `<span class="br-tail">${esc(s)}</span>`;
+
+  while ((m = WORD_RE.exec(text)) !== null) {
+    if (m.index > last) out += esc(text.slice(last, m.index));
+    const run = m[0];
+    if (HAN_RE.test(run)) {
+      for (const [seg, isHead] of splitHanRun(run, m.index, anchors)) {
+        out += isHead ? head(seg) : tail(seg);
+      }
+    } else {
+      const n = prefixLen(run, strength);
+      out += head(run.slice(0, n)) + tail(run.slice(n));
+    }
+    last = m.index + run.length;
+  }
+  if (last < text.length) out += esc(text.slice(last));
+  return out;
+}
+
+/* 单个段落 → DOM 节点（带分批让出主线程的能力） */
+function makePara(text, { strength, bionic, indent = true }) {
+  const p = document.createElement('p');
+  if (!indent) p.className = 'no-indent';
+  if (bionic) {
+    p.appendChild(bionicFragment(text, strength, document));
+  } else {
+    p.textContent = text;
+  }
+  return p;
+}
+
+/* ============================================================
+   2. 文件解析：TXT
+   ============================================================ */
+
+/* 编码嗅探：优先 UTF-8，失败回退 GBK */
+function decodeBuffer(buf) {
+  // BOM 检查 —— TextDecoder 的 utf-8 默认会自行吃掉 BOM（不产生 U+FEFF），
+  // 因此这里只需挑对解码器，不要再手动 slice，否则会误删正文首字符。
+  const b = new Uint8Array(buf);
+  if (b[0] === 0xFF && b[1] === 0xFE) {
+    let s = new TextDecoder('utf-16le').decode(buf);
+    return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;   // utf-16 解码器保留 BOM
+  }
+  if (b[0] === 0xFE && b[1] === 0xFF) {
+    let s = new TextDecoder('utf-16be').decode(buf);
+    return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+  }
+  // UTF-8（含 BOM）交给解码器处理，它会自动剥离 BOM
+  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buf);
+  let bad = 0;
+  for (let i = 0; i < utf8.length; i++) if (utf8.charCodeAt(i) === 0xFFFD) bad++;
+  // 中文 UTF-8 文本几乎不会出现 U+FFFD；出现 >0.3% 基本就是 GBK
+  if (bad > 0 && bad / utf8.length > 0.003) {
+    try {
+      const gbk = new TextDecoder('gbk').decode(buf);
+      // 再验一次：GBK 解出来不该有大量 U+FFFD
+      let bad2 = 0;
+      for (let i = 0; i < gbk.length; i++) if (gbk.charCodeAt(i) === 0xFFFD) bad2++;
+      if (bad2 < bad) return gbk;
+    } catch (_) { /* 浏览器不支持 gbk，保留 utf8 结果 */ }
+  }
+  return utf8;
+}
+
+/* 章节标题识别（中文网文 + 英文常见格式）
+   两个关键约束，缺一不可：
+   1) 章节标记之后必须紧跟**分隔符或行尾**（空白/全角空格/冒号/顿号/点/破折号）。
+      否则「第一章正文内容，验证导入。」会因"章"字命中字符类而被误判为标题，
+      这在中文网文里几乎必然发生。
+   2) 分隔符之后的标题文字限制在 30 字内，避免把整段正文吞进标题。
+   用 (?![\\p{L}\\p{N}]) 作为兜底：标记不能紧贴另一个字母/数字。 */
+const CHAP_NUM = '[0-9零一二三四五六七八九十百千万两]+';
+const CHAP_SEP = '[ \\t　：:、.．·\\-—–―]';
+const CHAPTER_RE = new RegExp(
+  '^[ \\t　]*(' +
+    `第\\s*${CHAP_NUM}\\s*[章节節回卷篇集话話]` +
+    '|Chapter\\s+[0-9IVXLC]+' +
+    '|CHAPTER\\s+[0-9IVXLC]+' +
+    `|卷\\s*${CHAP_NUM}` +
+    '|序章|序言|序曲|楔子|引子|前言|尾声|尾聲|终章|終章|后记|後記|番外[0-9一二三四五六七八九十]*' +
+  ')' +
+  // 其后必须是行尾，或至少一个分隔符后接不超过 30 字的标题
+  `(?:(?=${CHAP_SEP})${CHAP_SEP}{1,3}[^\\n]{1,30})?` +
+  '[ \\t　]*$', 'gm'
+);
+
+function splitChapters(text) {
+  const marks = [];
+  CHAPTER_RE.lastIndex = 0;
+  let m;
+  while ((m = CHAPTER_RE.exec(text)) !== null) {
+    marks.push({ index: m.index, title: m[0].trim() });
+  }
+  // 少于 3 个标记 → 不足以构成目录
+  if (marks.length < 3) return null;
+
+  const chapters = [];
+  // 标记前的内容（作者的话、简介等）
+  if (marks[0].index > 200) {
+    const pre = text.slice(0, marks[0].index).trim();
+    if (pre) chapters.push({ title: '卷首', body: pre });
+  }
+  for (let i = 0; i < marks.length; i++) {
+    const start = marks[i].index + marks[i].title.length;
+    const end = i + 1 < marks.length ? marks[i + 1].index : text.length;
+    chapters.push({ title: marks[i].title, body: text.slice(start, end) });
+  }
+  return chapters;
+}
+
+/* 文本规整 */
+function normalizeText(s) {
+  return s
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t　]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/* 把长文本转成段落数组 */
+function toParagraphs(body) {
+  const raw = normalizeText(body).split('\n');
+  const out = [];
+  for (let line of raw) {
+    line = line.trim();
+    if (!line) continue;
+    // 短行且无句末标点 → 视为标题
+    if (line.length <= 40 && !/[。！？.!?…"」』】]$/.test(line) &&
+        !/^[「『"'(（]/.test(line) && out.length < 3) {
+      out.push({ type: 'h3', text: line });
+    } else {
+      out.push({ type: 'p', text: line });
+    }
+  }
+  return out;
+}
+
+/* ============================================================
+   3. 文件解析：EPUB
+   ============================================================ */
+const JSZIP_CDNS = [
+  'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js',
+  'https://unpkg.com/jszip@3.10.1/dist/jszip.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
+];
+let jszipPromise = null;
+function loadJSZip() {
+  if (window.JSZip) return Promise.resolve(window.JSZip);
+  if (jszipPromise) return jszipPromise;
+  jszipPromise = new Promise((resolve, reject) => {
+    let i = 0;
+    const tryNext = () => {
+      if (i >= JSZIP_CDNS.length) return reject(new Error('JSZip 加载失败'));
+      const s = document.createElement('script');
+      s.src = JSZIP_CDNS[i++];
+      s.onload = () => window.JSZip ? resolve(window.JSZip) : tryNext();
+      s.onerror = tryNext;
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return jszipPromise;
+}
+
+const XML_ENT = { amp:'&', lt:'<', gt:'>', quot:'"', apos:"'", nbsp:' ', '#39':"'" };
+function unescapeXML(s) {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (full, ent) => {
+    if (ent[0] === '#') {
+      const code = ent[1] === 'x' || ent[1] === 'X'
+        ? parseInt(ent.slice(2), 16) : parseInt(ent.slice(1), 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : full;
+    }
+    return XML_ENT[ent] !== undefined ? XML_ENT[ent] : full;
+  });
+}
+/* HTML → 纯文本。
+   关键：必须先剔除整个 <head>，否则 <title> 的文字会混进正文首行，
+   导致目录页/封面页识别失效，也会让每章正文多出一个重复标题。 */
+function stripTags(html) {
+  return unescapeXML(
+    html
+      // 摘掉 head（含 title/base/meta/link）与脚本体、样式体
+      .replace(/<head\b[\s\S]*?<\/head>/gi, '')
+      .replace(/<(script|style|noscript|svg|iframe)\b[\s\S]*?<\/\1>/gi, '')
+      // 仅自闭合的 title（无 </head> 的片段式文档）
+      .replace(/<title\b[^>]*>[\s\S]*?<\/title>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|h[1-6]|li|tr|blockquote|section|article)>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+  )
+    .replace(/[ \t\u00a0]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/* ============================================================
+   ★ EPUB 目录（TOC）解析
+
+   ★ 为什么必须读目录文件：
+   EPUB 的"章节标题"有两个来源，可靠程度完全不同：
+
+     1) **spine + 猜标题**（旧做法，不可靠）
+        spine 只给出"阅读顺序的一串 XHTML"，**不含任何标题**。
+        旧代码只能去猜：取 <h1>/<h2>，没有就取 <title>，
+        再没有就编号「第 N 节」。于是：
+          · 封面页被当成一章（标题 "Cover"）
+          · 版权页/索引页混进正文
+          · 标题不准（<title> 常与正文标题不一致）
+          · **书的层级结构全丢** —— 一部文集里的每本书、每本书里的每篇，
+            在 spine 里是平铺的，看不出任何嵌套
+
+     2) **目录文件**（正确来源）
+        EPUB 规范要求提供其一：
+          · EPUB 3：manifest 里 properties="nav" 的 XHTML（<nav epub:type="toc">）
+          · EPUB 2：spine 的 toc 属性指向的 NCX（.ncx，<navMap><navPoint>）
+        里面是**带层级、带标题、带 href** 的目录树，这才是阅读器该用的。
+
+   所以这里把两种格式都解析出来，按 href 映射到 spine 里的章节，
+   标题优先用目录里的（准确），层级也一并保留。 */
+
+/* 解析 EPUB 3 的 nav.xhtml：<nav epub:type="toc"><ol><li><a href>标题</a></li>… */
+function parseNavDoc(html) {
+  const items = [];
+  // 只取 epub:type="toc" 的那个 nav（有的书还有 landmarks / page-list）
+  const navMatch = html.match(/<nav\b[^>]*(?:epub:type\s*=\s*"toc"|type\s*=\s*"toc")[^>]*>([\s\S]*?)<\/nav>/i)
+                || html.match(/<nav\b[^>]*>([\s\S]*?)<\/nav>/i);
+  if (!navMatch) return items;
+  const body = navMatch[1];
+
+  /* 用 <ol> 的嵌套深度作为层级。
+     这里不做完整 DOM 解析（单文件应用不引 DOMParser 依赖链），
+     而是扫描标签，用 ol 的开合维护深度。
+
+     ★ 深度从 -1 起算；闭合时必须 `depth--`，**不能** Math.max(0, ...) 夹紧 ——
+     夹紧会让计数器回不到 -1，导致后面所有兄弟节点深度多算 1 层。
+     这与 parseNcx 是同一个坑，两处都改过。 */
+  let depth = -1;
+  const re = /<ol\b[^>]*>|<\/ol>|<li\b[^>]*>|<a\b[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const tag = m[0];
+    if (/^<ol/i.test(tag)) { depth++; continue; }
+    if (/^<\/ol/i.test(tag)) { depth--; continue; }
+    if (m[1] === undefined) continue;                    // <li> 无 href
+    /* 保留 #锚点：EPUB 3 同样会把多个标题指向同一文件、用锚点区分 */
+    const raw = m[1].replace(/\\/g, '/');
+    const hash = raw.indexOf('#');
+    const href = decodeURIComponent(hash >= 0 ? raw.slice(0, hash) : raw);
+    const anchor = hash >= 0 ? decodeURIComponent(raw.slice(hash + 1)) : '';
+    const text = stripTags(m[2]).replace(/\s+/g, ' ').trim();
+    if (href && text) items.push({ href, anchor, title: text, depth: Math.max(0, depth), hasChildren: false });
+  }
+
+  /* ★ 标记"有子项"的条目（分组标题）—— 与 parseNcx 同一套逻辑。
+     <ol> 的嵌套就是层级，子项一定在父项的 </li> 之前出现，
+     所以倒着扫一遍，给每个条目"之前最近的、深度更浅的"打标记。
+     这样「恶棍列传」即使和子项分处不同文件，也能被认出来。 */
+  for (let i = items.length - 1; i > 0; i--) {
+    for (let j = i - 1; j >= 0; j--) {
+      if (items[j].depth < items[i].depth) { items[j].hasChildren = true; break; }
+    }
+  }
+  return items;
+}
+
+/* 解析 EPUB 2 的 toc.ncx：<navMap><navPoint><navLabel><text>标题</text>
+   层级由 navPoint 的嵌套深度给出。 */
+function parseNcx(xml) {
+  const items = [];
+  /* ★ 深度从 -1 起算：遇到第一个 <navPoint> 时 ++ 变成 0（顶层）。
+     ★★ 闭合时必须 `depth--` 而**不能** `Math.max(0, depth-1)`！
+     曾经那样夹紧过，结果是：闭合「甲组」时深度停在 0 而不是回到 -1，
+     于是后面所有兄弟节点的深度都多算 1 层
+     （实测「乙组」被算成 depth=1、它的子项 depth=2）。
+     计数器必须能回到 -1，才能与起始值对齐。 */
+  let depth = -1;
+  const re = /<navPoint\b[^>]*>|<\/navPoint>|<text\b[^>]*>([\s\S]*?)<\/text>|<content\b[^>]*src\s*=\s*"([^"]*)"/gi;
+  let pendingText = null;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const tag = m[0];
+    if (/^<navPoint/i.test(tag)) { depth++; continue; }
+    if (/^<\/navPoint/i.test(tag)) { depth--; continue; }
+    if (m[1] !== undefined) { pendingText = stripTags(m[1]).replace(/\s+/g, ' ').trim(); continue; }
+    if (m[2] !== undefined) {
+      /* ★ 必须**保留 #锚点**！
+         Sigil/Calibre 生成的书常常"多个标题指向同一个文件、靠锚点区分"，
+         实测博尔赫斯全集：15 个文件承载 288 个标题
+         （split_000.xhtml 一个文件里就有 17 个 sigil_toc_id_N）。
+         早先这里 .split('#')[0] 把锚点丢掉了，导致同一文件的多个标题
+         无法区分 → 只能靠标题文字搜索定位 → 顺序错乱、标题丢失。 */
+      const raw = m[2].replace(/\\/g, '/');
+      const hash = raw.indexOf('#');
+      const href = decodeURIComponent(hash >= 0 ? raw.slice(0, hash) : raw);
+      const anchor = hash >= 0 ? decodeURIComponent(raw.slice(hash + 1)) : '';
+      if (href) items.push({ href, anchor, title: pendingText || '', depth: Math.max(0, depth), hasChildren: false });
+      pendingText = null;
+    }
+  }
+
+  /* ★ 标记"有子项"的条目（分组标题）。
+     navPoint 的子节点一定出现在它自己的 </navPoint> 之前，
+     所以某条目一旦被更深层的 navPoint 包住，它就是分组标题。
+     倒着扫一遍：看到深度 d 的条目，就给"它之前最近的、深度更浅的"那个打标记。
+     这样「恶棍列传」即使和子项分处不同文件，也能被认出来 —— 见 parseEPUB 里的说明。 */
+  for (let i = items.length - 1; i > 0; i--) {
+    for (let j = i - 1; j >= 0; j--) {
+      if (items[j].depth < items[i].depth) { items[j].hasChildren = true; break; }
+    }
+  }
+  return items;
+}
+
+/* 解析 container.xml → OPF 路径 → manifest/spine → 章节文本 */
+async function parseEPUB(buf, onProgress) {
+  const JSZip = await loadJSZip();
+  const zip = await JSZip.loadAsync(buf);
+
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) throw new Error('不是有效的 EPUB：缺少 container.xml');
+  const containerXml = await containerFile.async('string');
+  const opfPath = containerXml.match(/full-path\s*=\s*"([^"]+)"/i)?.[1];
+  if (!opfPath) throw new Error('不是有效的 EPUB：找不到 OPF 路径');
+  const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+  const opfXml = await zip.file(opfPath).async('string');
+
+  // 书名
+  const title = unescapeXML(opfXml.match(/<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i)?.[1]?.trim() || '未命名');
+
+  // manifest: id → href / media-type
+  const manifest = {};
+  const itemRe = /<item\b[^>]*\/?>/gi;
+  let it;
+  while ((it = itemRe.exec(opfXml)) !== null) {
+    const tag = it[0];
+    const id   = tag.match(/\bid\s*=\s*"([^"]*)"/i)?.[1];
+    const href = tag.match(/\bhref\s*=\s*"([^"]*)"/i)?.[1];
+    const mt   = tag.match(/media-type\s*=\s*"([^"]*)"/i)?.[1] || '';
+    if (id && href) manifest[id] = { href: decodeURIComponent(href), mediaType: mt };
+  }
+
+  // ---- spine 顺序（含 linear 属性）----
+  // ★ linear="no" 表示"不在正文阅读顺序里"（封面、版权页、索引、广告页等）。
+  //   旧代码完全忽略这个属性，把这些页当正文章节收进来 —— 这是"多出无关章节"的主因。
+  const spineIds = [];
+  const refRe = /<itemref\b[^>]*\/?>/gi;
+  let rf;
+  while ((rf = refRe.exec(opfXml)) !== null) {
+    const tag = rf[0];
+    const idref = tag.match(/\bidref\s*=\s*"([^"]*)"/i)?.[1];
+    const linear = (tag.match(/\blinear\s*=\s*"([^"]*)"/i)?.[1] || 'yes').toLowerCase();
+    if (idref) spineIds.push({ idref, linear });
+  }
+  if (!spineIds.length) throw new Error('EPUB 目录为空');
+
+  /* ---- 读目录文件（TOC），拿到"准确标题 + 层级" ---- */
+  // EPUB 3：manifest 里 properties 含 nav 的 XHTML
+  // EPUB 2：spine 的 toc 属性指向的 .ncx
+  let tocItems = [];
+  let tocSource = '';
+
+  const navId = Object.keys(manifest).find(id => /x?html/i.test(manifest[id].mediaType || '') &&
+    new RegExp(`properties\\s*=\\s*"[^"]*\\bnav\\b`, 'i').test(
+      opfXml.match(new RegExp(`<item\\b[^>]*id\\s*=\\s*"${id}"[^>]*>`, 'i'))?.[0] || ''));
+  if (navId) {
+    const nf = zip.file(opfDir + manifest[navId].href) || zip.file(manifest[navId].href);
+    if (nf) {
+      tocItems = parseNavDoc(await nf.async('string'));
+      if (tocItems.length) tocSource = 'EPUB3 nav';
+    }
+  }
+
+  if (!tocItems.length) {
+    // spine toc="xxx" → manifest 里的 ncx
+    const ncxId = opfXml.match(/<spine\b[^>]*\btoc\s*=\s*"([^"]*)"/i)?.[1];
+    let ncxPath = null;
+    if (ncxId && manifest[ncxId]) ncxPath = opfDir + manifest[ncxId].href;
+    if (!ncxPath) {
+      // 兜底：直接找 .ncx 或 media-type 为 dtbncx 的条目
+      const k = Object.keys(manifest).find(id => /\.ncx$/i.test(manifest[id].href) ||
+        /dtbncx/i.test(manifest[id].mediaType || ''));
+      if (k) ncxPath = opfDir + manifest[k].href;
+    }
+    if (ncxPath) {
+      const ncf = zip.file(ncxPath);
+      if (ncf) {
+        tocItems = parseNcx(await ncf.async('string'));
+        if (tocItems.length) tocSource = 'EPUB2 ncx';
+      }
+    }
+  }
+
+  /* ============================================================
+     ★★ 章节的粒度是"目录条目"，不是"文件"
+
+     实测（博尔赫斯全集，Sigil 生成）：
+       · spine 只有 17 个文件
+       · toc.ncx 有 288 个 navPoint（标题）
+       · 15 个文件承载了这 288 个标题 —— 平均每文件 18~19 个
+       · navPoint 用 #sigil_toc_id_N 锚点区分同一文件内的不同章节
+
+     所以"一个文件 = 一章"会把 288 章的书读成 17 章，
+     大量内容被合并，目录看起来严重缺章。
+
+     正确做法：以**目录条目**为章节单位 ——
+     一个文件若被目录列出了 N 个标题（N 个锚点），
+     就按锚点位置把它切成 N 段，每段自成一章。
+
+     注意：不假设 XHTML 里真的有对应 id。Sigil/Calibre 的锚点
+     经常只存在于 NCX 里、正文并无该 id。所以用两种定位策略：
+       a) 找得到 id  → 用该 id 的位置切
+       b) 找不到 id  → 用**标题文字在正文中的首次出现**切
+     都失败 → 退回"整文件一章"（至少内容不丢）。 */
+  const norm = p => String(p || '').replace(/^\.\//, '').replace(/\\/g, '/');
+
+  // 目录条目按"所属文件"分组，保留文件内原本顺序（push 顺序即 NCX 顺序）
+  const tocByFile = new Map();
+  for (const t of tocItems) {
+    const key = norm(t.href);
+    if (!tocByFile.has(key)) tocByFile.set(key, []);
+    tocByFile.get(key).push(t);
+  }
+
+  /* 正则转义（写成函数，避免内联正则里的转义被误读） */
+  const reEsc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  /* 在 XHTML 里定位某个目录条目的起点（字符偏移；找不到返回 -1） */
+  const findAnchorOffset = (htmlSrc, item) => {
+    // a) 锚点 id
+    if (item.anchor) {
+      const m = htmlSrc.match(new RegExp('\\bid\\s*=\\s*["\']' + reEsc(item.anchor) + '["\']', 'i'));
+      if (m) {
+        const back = htmlSrc.lastIndexOf('<', m.index);
+        return back >= 0 ? back : m.index;
+      }
+    }
+    // b) 标题文字（取前 6 个非空白字符，字符间允许少量标签/空白）
+    const key = (item.title || '').replace(/[\s\u3000]/g, '').slice(0, 6);
+    if (key.length >= 2) {
+      const pat = key.split('').map(reEsc).join('[\\s\\S]{0,24}?');
+      const m = htmlSrc.match(new RegExp(pat));
+      if (m) {
+        const back = htmlSrc.lastIndexOf('<', m.index);
+        return back >= 0 ? back : m.index;
+      }
+    }
+    return -1;
+  };
+
+  onProgress?.(tocItems.length
+    ? '读取目录：' + tocSource + '，' + tocItems.length + ' 项'
+    : '未找到目录文件，回退到标题推断');
+
+  // 解析每个条目
+  const chapters = [];
+  for (let i = 0; i < spineIds.length; i++) {
+    const idref = spineIds[i].idref;
+    const linear = spineIds[i].linear;
+    const item = manifest[idref];
+    if (!item) continue;
+    // 严格判定"是不是 XHTML 正文"，别用三重取反把运算符优先级绕晕
+    const isHtml = /x?html/i.test(item.mediaType || '') || /\.x?html?$/i.test(item.href);
+    if (!isHtml) continue;                                // 跳过 ncx / 图片 / 字体
+
+    const path = opfDir + item.href;
+    const zf = zip.file(path) || zip.file(item.href);
+    if (!zf) continue;
+    const htmlSrc = await zf.async('string');
+
+    // 这个文件在目录里被列出了几个标题？
+    const entries = (tocByFile.get(norm(item.href)) || []).filter(t => t.title);
+
+    /* ---- 有目录条目：按锚点把文件切成多章 ---- */
+    if (entries.length) {
+      /* ★ 关键：**按目录里出现的先后顺序**切片，不要按"找到的位置"重排。
+
+         踩过的坑：早先对定位结果做 sort(by offset)，
+         但定位有两种手段（id 锚点 / 标题文字搜索），
+         用文字搜索找到的位置往往**不是该章节真正的起点**
+         （比如书名「恶棍列传」在正文里出现在别处），
+         重排后目录顺序就乱了 —— 表现为"序言跑到第 2 章"、
+         「玫瑰角的汉子」窜到前面，甚至整个标题丢失。
+
+         EPUB 的目录顺序**本身就是权威顺序**（它就是阅读顺序），
+         所以这里按 entries 原顺序走，只把位置做"单调化"处理：
+         某个条目定位失败时，沿用上一个条目的位置
+         （宁可切出一小段，也不要打乱后面的顺序）。 */
+      const marks = [];
+      let lastOff = 0;
+      for (const e of entries) {
+        let off = findAnchorOffset(htmlSrc, e);
+        // 单调化：位置不能回退，否则切片会重叠或倒序
+        if (off < lastOff) off = -1;
+        if (off >= 0) lastOff = off;
+        marks.push({ off, title: e.title, depth: e.depth || 0, hasChildren: !!e.hasChildren });
+      }
+
+      const located = marks.filter(m => m.off >= 0).length;
+      if (located >= 1) {
+        for (let k = 0; k < marks.length; k++) {
+          const m = marks[k];
+          if (m.off < 0) continue;                 // 没定位到就不单独成章
+          // 第 0 段从文件开头算起：锚点前的内容（书名页等）并入首章，避免丢字
+          const start = k === 0 ? 0 : m.off;
+          // 下一个"定位成功"的条目作为结束点
+          let end = htmlSrc.length;
+          for (let j = k + 1; j < marks.length; j++) {
+            if (marks[j].off >= 0) { end = marks[j].off; break; }
+          }
+          if (end <= start) continue;
+          const seg = stripTags(htmlSrc.slice(start, end));
+          /* ★ 空段落的两种情形，处理方式不同：
+
+             1) **分组标题**（如「恶棍列传」）—— 它是 navPoint 的父节点，
+                锚点后面紧跟第一个子项的锚点，所以切出来几乎是空的。
+                这类条目**必须保留**：它代表一本书/一个部分，
+                目录里没有它，"文集"的层级就断了。
+                做法：保留标题、正文置空，侧栏仍然显示（且不带内容）。
+
+             2) 真正的空白页（纯图片页、分隔页）—— 丢弃。
+
+             区分依据：**目录条目自身有没有子项**（见下）。 */
+          /* ★ 分组标题的判定依据：**目录条目自身有没有子项**，
+             而不是"下一个同文件条目的 depth 是否更深"。
+
+             踩过的坑（多级目录被拉平）：早先这里写的是
+                 const nextDepth = 找 marks 里下一个定位成功的条目;
+                 const isGroupHeading = nextDepth > m.depth;
+             它只在"父标题和它的子标题被切在同一个文件里"时才成立。
+             而真实 EPUB（以及 tests/toc.epub）里的常见形态是
+             **每个标题一个文件**：
+
+                 <li><a href="book1-title.html">恶棍列传</a>
+                   <ol><li><a href="book1-ch1.html">…</a></li></ol></li>
+
+             此时每个文件只对应 1 个条目，marks 里没有"下一个"，
+             nextDepth 恒为 -1，isGroupHeading 恒为 false ——
+             于是「恶棍列传」这类分组标题全部退化成普通章节，
+             多级目录又变回平铺。这正是测试 test-epub-split 抓到的那条。
+
+             修法：分组身份是**目录树自身的属性**，
+             应当直接看这个条目有没有子节点（marks[].hasChildren，
+             由 parseNavDoc / parseNcx 在解析目录时标好），
+             与它和兄弟落在哪个文件无关。
+
+             这个标记同时供下面"空段落是否丢弃"使用：
+             一个切出来几乎为空的段落，只要是分组标题就必须保留
+             （否则"文集"的层级就断了），否则当空白页丢弃。 */
+          const isGroupHeading = !!m.hasChildren;
+
+          if (seg.length < 10 && !isGroupHeading) continue;
+          chapters.push({
+            title: String(m.title).slice(0, 60),
+            body: seg,
+            depth: m.depth,
+            linear,
+            isGroup: isGroupHeading,     // 分组标题：侧栏显示，正文可能为空也可能不空
+          });
+          if (chapters.length >= 3000) break;
+        }
+        if (chapters.length >= 3000) break;
+        if (i % 5 === 0) onProgress?.('解析章节 ' + (i + 1) + '/' + spineIds.length);
+        continue;                                  // 本文件已按目录切完
+      }
+      // 一个锚点都没定位到 → 落到下面"整文件一章"兜底
+    }
+
+    /* ---- 无目录条目 / 定位失败：整文件一章（原逻辑） ---- */
+    const text = stripTags(htmlSrc);
+    if (text.length < 10) continue;                // 跳过空白页
+
+    const firstLine = text.split('\n', 1)[0].trim();
+    const collapsed = firstLine.replace(/^(.{1,12}?)\1$/, '$1');
+    const looksLikeToc = /^(目\s*录|目錄|Contents|Table of Contents|CONTENTS)$/i.test(collapsed);
+    if (!entries.length && looksLikeToc &&
+        (text.length < 3000 || !/[。！？.!?]/.test(text.slice(0, 3000)))) continue;
+
+    // linear="no" 且目录里也没有 → 不是正文内容（封面、版权页等）
+    if (linear === 'no' && !entries.length) continue;
+
+    let chapterTitle = entries[0] ? entries[0].title : '';
+    if (!chapterTitle) {
+      const h = htmlSrc.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i);
+      const t = htmlSrc.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      chapterTitle = h ? stripTags(h[1]) : (t ? unescapeXML(t[1]).trim() : '');
+    }
+    if (!chapterTitle) chapterTitle = '第 ' + (chapters.length + 1) + ' 节';
+
+    chapters.push({
+      title: chapterTitle.slice(0, 60),
+      body: text,
+      depth: entries[0] ? (entries[0].depth || 0) : 0,
+      linear,
+    });
+    if (i % 5 === 0) onProgress?.('解析章节 ' + (i + 1) + '/' + spineIds.length);
+    if (chapters.length >= 3000) break;            // 安全上限
+  }
+  if (!chapters.length) throw new Error('EPUB 中没有找到可读文本（可能是纯图片书）');
+  return { title, chapters, meta: `EPUB · ${chapters.length} 章` };
+}
+
+/* ============================================================
+   4. 应用状态
+   ============================================================ */
+const DEFAULTS = {
+  bionic: true,
+  mode: 'bold',
+  strength: 3,
+  // headSize 已废弃：锚点缩放会破坏中文断行，整条路被移除（见 CSS 里的记录）。
+  // 保留这个键只为兼容老用户已保存的 prefs，读写都不再使用它。
+  tail: 50,
+  tint: '#b4531f',      // 锚点颜色
+  tailColor: '#6b6862', // 词尾颜色
+  tailMode: 'follow',   // follow = 淡化 | custom = 指定颜色
+  size: 19,
+  lh: 19,
+  para: 11,
+  width: 34,
+  font: 'serif',
+  theme: 'light',
+  align: 'left',        // left = 左对齐（默认，字距稳定）| justify = 两端对齐
+  // 阅读背景：plain = 纯色（默认，零成本）| image = 拱廊照片 + 80% 玻璃板
+  bg: 'plain',
+  // 老数据迁移标记。默认 false：只有"用户在当前会话里明确选过对齐方式"
+  // 才会被置为 true（见 savePrefs）。历史遗留的 justify 没有这个标记，
+  // 因此会被 loadPrefs() 迁移回 left。
+  alignMigrated: false,
+};
+const PREF_KEY = 'bionic.prefs.v1';
+const PROGRESS_KEY = 'bionic.progress.v1';
+
+const state = {
+  book: null,          // { title, chapters:[{title, body, paras}] }
+  chapter: 0,
+  prefs: { ...DEFAULTS },
+  renderToken: 0,
+};
+
+const FONTS = {
+  serif: '"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",Georgia,serif',
+  kai:   '"Kaiti SC","STKaiti","KaiTi","楷体","Noto Serif SC",serif',
+  sans:  '-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif',
+};
+const TINTS = ['#b4531f', '#1f5fb4', '#1f8a5b', '#8a1fb4', '#b41f4a', '#6b6862'];
+const TAIL_COLORS = ['#8a8680', '#5f5b55', '#3b3226', '#1f5fb4', '#b4531f'];
+
+/* ============================================================
+   5. 偏好读写与样式应用
+   ============================================================ */
+/* 安全存储：file:// 下浏览器把 origin 视为 opaque，访问 localStorage 会抛
+   SecurityError。这里退化到内存存储，保证当次会话内一切功能正常，
+   并只提示用户一次（否则设置看起来"没保存"却毫无反馈）。 */
+const memStore = new Map();
+let storageWarned = false;
+const store = {
+  available: true,
+  get(k) {
+    try { return localStorage.getItem(k); }
+    catch (_) { return memStore.has(k) ? memStore.get(k) : null; }
+  },
+  set(k, v) {
+    try { localStorage.setItem(k, v); return true; }
+    catch (_) {
+      memStore.set(k, v);
+      if (!storageWarned) {
+        storageWarned = true;
+        setTimeout(() => toast('当前以本地文件方式打开，设置与进度无法长期保存（关闭页面即丢失）。部署到网站或本地起个服务后即可正常保存。', 6000), 900);
+      }
+      return false;
+    }
+  },
+};
+
+function loadPrefs() {
+  try {
+    const raw = store.get(PREF_KEY);
+    if (raw) Object.assign(state.prefs, JSON.parse(raw));
+  } catch (_) {}
+  // 历史遗留：早期版本把 justify 存进过偏好，之后每次打开都自动恢复两端对齐，
+  // 而两端对齐正是"字/词之间被撑出空白"的元凶（详见 README 已知问题 4）。
+  // 这里做一次性迁移：旧设置里的 justify 一律改回 left，并把迁移标记写进偏好。
+  if (state.prefs.align === 'justify' && !state.prefs.alignMigrated) {
+    state.prefs.align = 'left';
+    state.prefs.alignMigrated = true;
+    try { store.set(PREF_KEY, JSON.stringify(state.prefs)); } catch (_) {}
+  }
+}
+function savePrefs() {
+  store.set(PREF_KEY, JSON.stringify(state.prefs));
+}
+
+/* ============================================================
+   5b. 合成加粗的宽度补偿（"字距被撑开"的真正原因）
+   ============================================================
+   实测数据（Chrome + 各中文字体，字号 19px，样本 10 个重复汉字）：
+
+      字体            常规每字   加粗每字   多出      比例
+      宋体 SimSun     19.000    19.372    +0.372   1.0196   ← 合成加粗
+      楷体 KaiTi      19.000    19.000     0.000   1.0000   ← 有真粗体
+      微软雅黑        19.000    19.000     0.000   1.0000   ← 有真粗体
+      黑体 SimHei     19.000    19.000     0.000   1.0000   ← 有真粗体
+
+   结论：**当正文字体没有真正的 Bold 字重时**（中文里最常见的就是宋体），
+   浏览器会用"合成加粗"——把常规字形描粗一遍。这个操作会同时把字形的
+   advance width（格子宽度）放大 1.96%。
+
+   格子变宽意味着**每个锚点都会把右边的字推开一点**。一行里有几个锚点，
+   误差就累加几倍。这就是"字与字之间被撑出一段空白"的真正来源。
+
+   注意：这跟"放大锚点"无关 —— 只加粗时同样存在，只是 19px 下每字只多
+   0.372px，肉眼看不出来；一旦把锚点放大，整体尺度变大，这个固定比例
+   就变得非常显眼，所以表现为"只有放大时才拉伸"。
+
+   修法：给锚点加一个负的 margin-inline-end，把多出来的宽度收回去。
+   但补偿值必须**实测**——写死 -0.0196em 的话，换成微软雅黑（有真粗体、
+   本就不需要补偿）就会把字挤在一起。
+
+   为什么用 margin 而不是 letter-spacing：
+   letter-spacing 会同时作用在锚点自己身上（单字也占一份），
+   而这里要补的是"锚点右边多出来的那一段"，正好是外边距的语义。
+   实测 -0.0196em 能把 19.372px 精确收回 19.000px。 */
+const HEAD_MEASURE_CHARS = '国字文的是一不了在人有我';   // 覆盖常见笔画密度
+const measureCache = { key: '', value: 0 };   // 按「字体|字号」缓存，避免每次拖动滑块都重测
+function measureBoldInflation(font, size) {
+  const host = document.createElement('div');
+  host.style.cssText =
+    'position:absolute;left:-9999px;top:0;visibility:hidden;' +
+    `white-space:nowrap;font-family:${font};font-size:${size}px;line-height:1`;
+  document.body.appendChild(host);
+  const sample = HEAD_MEASURE_CHARS.repeat(3);
+  const probe = weight => {
+    const el = document.createElement('span');
+    el.style.cssText = `font-weight:${weight};white-space:nowrap`;
+    el.textContent = sample;
+    host.replaceChildren(el);
+    return el.getBoundingClientRect().width / sample.length;
+  };
+  const reg = probe(400);
+  const bold = probe(700);
+  host.remove();
+  if (!reg || !bold) return 0;
+  // 返回"每字多出的宽度"占字号的比例（通常 0 或约 0.0196）
+  const ratio = (bold - reg) / size;
+  // 过滤浮点噪声与异常值：超过 20% 显然不是合成加粗，不作为补偿依据
+  return (ratio > 0.0005 && ratio < 0.2) ? ratio : 0;
+}
+
+function applyPrefs() {
+  const p = state.prefs;
+  const root = document.documentElement;
+
+  root.dataset.theme = p.theme;
+  // 阅读背景：纯色 / 背景图。CSS 侧由 html[data-bg="image"] 打开那张照片。
+  root.dataset.bg = p.bg === 'image' ? 'image' : 'plain';
+  root.dataset.bionic = p.mode === 'bold' ? 'bold' : (p.mode === 'mix' ? 'mix' : 'color');
+  root.dataset.tail = p.tailMode === 'custom' ? 'custom' : 'follow';
+  // ★ 锚点缩放已整体移除：任何缩放都必须把锚点变成原子盒
+  // （transform 对纯内联无效 → 只能用 inline-block），
+  // 而原子盒会在两侧无条件加断行机会，破坏中文排版。详见 CSS 里的记录。
+  root.dataset.align = p.align === 'justify' ? 'justify' : 'left';
+  // 两端对齐时真正会被摊开字距的是"汉字行"，中文优先用 inter-ideograph
+  root.dataset.justify = p.align === 'justify' ? 'han' : '';
+
+  const s = root.style;
+  s.setProperty('--bionic-tint', p.tint);
+  s.setProperty('--tail-color', p.tailColor);
+  s.setProperty('--tail-opacity', (p.tail / 100).toFixed(2));
+  s.setProperty('--reader-size', p.size + 'px');
+  s.setProperty('--reader-lh', (p.lh / 10).toFixed(2));
+  s.setProperty('--reader-para', (p.para / 10).toFixed(2) + 'em');
+  s.setProperty('--reader-width', p.width + 'em');
+  s.setProperty('--reader-font', FONTS[p.font] || FONTS.serif);
+  s.setProperty('--head-weight', p.mode === 'color' ? '400' : '700');
+  // （此处原本写 --head-zoom；锚点缩放已移除，见 CSS 里的完整记录）
+  // 合成加粗补偿：只在「加粗」生效且字体确实需要补偿时才非零。
+  // 取值实测得到（见 measureBoldInflation），换字体/字号会自动重算。
+  const needsBold = p.mode !== 'color' && p.bionic;
+  let inflate = 0;
+  if (needsBold) {
+    const key = `${p.font}|${p.size}`;
+    if (measureCache.key !== key) {
+      measureCache.key = key;
+      measureCache.value = measureBoldInflation(FONTS[p.font] || FONTS.serif, p.size);
+    }
+    inflate = measureCache.value;
+  }
+  s.setProperty('--head-ls', inflate ? (-inflate * p.size).toFixed(3) + 'px' : '0px');
+  // 锚点颜色：变色/混合模式用用户选的颜色，纯加粗模式保持正文色
+  s.setProperty('--head-color',
+    p.mode === 'bold'
+      ? (p.theme === 'dark' ? '#f2f0eb' : (p.theme === 'sepia' ? '#2e261b' : '#1c1b19'))
+      : p.tint);
+
+  syncControls();
+  savePrefs();
+}
+
+/* 把 state 同步到控件 UI */
+function syncControls() {
+  const p = state.prefs;
+  const set = (sel, v) => { const e = $(sel); if (e) e.value = v; };
+  const txt = (sel, v) => { const e = $(sel); if (e) e.textContent = v; };
+
+  $$('#segMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === p.mode));
+  $$('#segFont button').forEach(b => b.classList.toggle('on', b.dataset.font === p.font));
+  $$('#segTheme button').forEach(b => b.classList.toggle('on', b.dataset.theme === p.theme));
+  $$('#segAlign button').forEach(b => b.classList.toggle('on', b.dataset.align === (p.align || 'left')));
+  $$('#segBg button').forEach(b => b.classList.toggle('on', b.dataset.bg === (p.bg || 'plain')));
+  txt('#alignNow', p.align === 'justify' ? '两端对齐（会把空隙摊到字间）' : '左对齐');
+
+  set('#rStrength', p.strength); txt('#vStrength', STRENGTH_NAME[p.strength]);
+  set('#rTail', p.tail);         txt('#vTail', p.tail + '%');
+  set('#rSize', p.size);         txt('#vSize', p.size + 'px');
+  set('#rLh', p.lh);             txt('#vLh', (p.lh / 10).toFixed(1));
+  set('#rPara', p.para);         txt('#vPara', (p.para / 10).toFixed(1) + 'em');
+  set('#rWidth', p.width);       txt('#vWidth', p.width + '字');
+
+  // 锚点色
+  $$('#swatches .swatch').forEach(el => el.classList.toggle('on', el.dataset.color === p.tint));
+  const picker = $('#tintPicker');
+  if (picker && /^#[0-9a-f]{6}$/i.test(p.tint)) picker.value = p.tint;
+
+  // 词尾色：follow 或自定义
+  $$('#tailSwatches .swatch').forEach(el => {
+    const isFollow = el.dataset.tail === 'follow';
+    el.classList.toggle('on', isFollow ? p.tailMode !== 'custom' : (p.tailMode === 'custom' && el.dataset.color === p.tailColor));
+  });
+  const tp = $('#tailPicker');
+  if (tp && /^#[0-9a-f]{6}$/i.test(p.tailColor)) tp.value = p.tailColor;
+
+  $('#btnBionic').classList.toggle('on', p.bionic);
+}
+
+/* ============================================================
+   6. 渲染
+   ============================================================ */
+const BATCH = 120;   // 每批段落数，超过则让出主线程
+
+async function renderChapter(idx, keepScroll = false) {
+  const book = state.book;
+  if (!book) return;
+  idx = Math.max(0, Math.min(idx, book.chapters.length - 1));
+  state.chapter = idx;
+
+  const token = ++state.renderToken;
+  const ch = book.chapters[idx];
+  const reader = $('#reader');
+  const scroller = $('#scroller');
+  const p = state.prefs;
+
+  // 懒解析段落：首次访问时才切分
+  if (!ch.paras) ch.paras = toParagraphs(ch.body);
+
+  scroller.style.overflowY = 'hidden';
+  reader.replaceChildren();
+
+  const frag = document.createDocumentFragment();
+
+  if (idx > 0 || book.chapters.length > 1) {
+    const mk = document.createElement('span');
+    mk.className = 'chapter-marker';
+    mk.textContent = `${idx + 1} / ${book.chapters.length}`;
+    frag.appendChild(mk);
+  }
+
+  const paras = ch.paras;
+  for (let i = 0; i < paras.length; i++) {
+    const para = paras[i];
+    if (para.type === 'h3') {
+      const h = document.createElement('h3');
+      h.textContent = para.text;
+      frag.appendChild(h);
+    } else {
+      frag.appendChild(makePara(para.text, { strength: p.strength, bionic: p.bionic, indent: true }));
+    }
+    if (i % BATCH === BATCH - 1) {
+      reader.appendChild(frag);              // 分批挂载，避免长时间白屏
+      await yieldToUI();
+      if (token !== state.renderToken) return; // 已被新的渲染取代
+    }
+  }
+  reader.appendChild(frag);
+
+  scroller.style.overflowY = 'auto';
+  if (!keepScroll) scroller.scrollTop = 0;
+
+  updateTocActive();
+  updateProgress();
+  updatePager();          // 底部翻页条：章名 / 序号 / 百分比 / 按钮可用性
+  saveProgress();
+}
+
+/* 仅切换 bionic 开关时，重绘当前章（保留滚动比例） */
+function rerenderPreservingScroll() {
+  const scroller = $('#scroller');
+  const ratio = scroller.scrollHeight > scroller.clientHeight
+    ? scroller.scrollTop / (scroller.scrollHeight - scroller.clientHeight)
+    : 0;
+  renderChapter(state.chapter, true).then(() => {
+    requestAnimationFrame(() => {
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      if (max > 0) scroller.scrollTop = ratio * max;
+    });
+  });
+}
+
+function updateProgress() {
+  const book = state.book;
+  if (!book) { $('#progress').style.width = '0%'; return; }
+  const scroller = $('#scroller');
+  const max = scroller.scrollHeight - scroller.clientHeight;
+  const within = max > 4 ? scroller.scrollTop / max : 1;
+  const overall = (state.chapter + within) / book.chapters.length;
+  $('#progress').style.width = (overall * 100).toFixed(2) + '%';
+}
+
+/* ============================================================
+   7. 目录
+   ============================================================ */
+function buildToc(filter = '') {
+  const book = state.book;
+  const list = $('#tocList');
+  list.replaceChildren();
+  if (!book) return;
+
+  const kw = filter.trim().toLowerCase();
+  const frag = document.createDocumentFragment();
+  let shown = 0;
+
+  book.chapters.forEach((ch, i) => {
+    if (kw && !ch.title.toLowerCase().includes(kw)) return;
+    shown++;
+    const b = document.createElement('button');
+    b.className = 'toc-item' + (i === state.chapter ? ' active' : '');
+    b.dataset.idx = i;
+    // ★ 层级：沿用 EPUB 目录里的嵌套深度（ch.depth）。
+    //   同一层里"纯标题页"（它有子项）与"正文页"视觉上要能区分，
+    //   否则多级目录看起来还是平铺的 —— 那正是用户报的问题。
+    const depth = Math.max(0, Math.min(ch.depth || 0, 4));
+    if (depth) b.dataset.depth = depth;
+    // ★ 分组标题（如「恶棍列传」「小径分岔的花园」）：它代表一本书/一个部分，
+    //   正文为空。做成"不可点击的标题行"，点击时跳到它的**第一个子项**，
+    //   这样用户点它不会看到空白页。
+    if (ch.isGroup) {
+      b.dataset.group = '1';
+      // 跳到第一个子项
+      let target = i;
+      for (let j = i + 1; j < book.chapters.length; j++) {
+        if (!book.chapters[j].isGroup) { target = j; break; }
+      }
+      b.dataset.idx = target;
+    }
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = i + 1;
+    b.appendChild(num);
+    b.appendChild(document.createTextNode(ch.title));
+    frag.appendChild(b);
+  });
+
+  if (!shown) {
+    const d = document.createElement('div');
+    d.className = 'hint';
+    d.style.padding = '10px';
+    d.textContent = '没有匹配的章节';
+    frag.appendChild(d);
+  }
+  list.appendChild(frag);
+}
+
+function updateTocActive() {
+  $$('#tocList .toc-item').forEach(el => {
+    const on = +el.dataset.idx === state.chapter;
+    el.classList.toggle('active', on);
+    if (on && !el.dataset.scrolled) {
+      el.scrollIntoView?.({ block: 'nearest' });   // 少数嵌入环境无此 API，缺失时忽略
+      el.dataset.scrolled = '1';
+    }
+  });
+}
+
+function goChapter(i, fromToc = false) {
+  if (!state.book) return;
+  renderChapter(i);
+  if (fromToc && window.innerWidth <= 820) closeSidebar();
+}
+
+/* ============================================================
+   ★ 章节导航（底部条）
+
+   只做"上一章 / 下一章"。
+   章内滚动交给滚轮与滚动条 —— 不需要额外的"翻屏"按钮：
+   多一组按钮既占地方，又和滚轮重复。
+   ============================================================ */
+
+/* 下一章；已是最后一章时给出提示（而不是静默无反应） */
+function nextChapter() {
+  const book = state.book;
+  if (!book) return;
+  if (state.chapter >= book.chapters.length - 1) { toast('已经是最后一章了'); return; }
+  goChapter(state.chapter + 1);
+}
+
+/* 上一章；已是第一章时给出提示 */
+function prevChapter() {
+  const book = state.book;
+  if (!book) return;
+  if (state.chapter <= 0) { toast('已经是第一章了'); return; }
+  goChapter(state.chapter - 1);
+}
+
+/* 刷新底部章节条（章名 / 章序号 / 章内滚动百分比 / 按钮可用性） */
+function updatePager() {
+  const book = state.book;
+  const pager = $('#pager');
+  if (!pager) return;
+  if (!book) { pager.classList.add('hidden'); return; }
+  pager.classList.remove('hidden');
+
+  const ch = book.chapters[state.chapter] || {};
+  const s = $('#scroller');
+  const max = s.scrollHeight - s.clientHeight;
+  const within = max > 4 ? Math.min(1, Math.max(0, s.scrollTop / max)) : 1;
+
+  // 分组标题没有正文，标题后加个记号，免得读者以为是空章
+  $('#pgChapter').textContent = (ch.title || '') + (ch.isGroup ? '（部分）' : '');
+  $('#pgCount').textContent = `${state.chapter + 1} / ${book.chapters.length}`;
+  $('#pgFill').style.width = (within * 100).toFixed(1) + '%';
+
+  $('#pgPrevCh').disabled = state.chapter <= 0;
+  $('#pgNextCh').disabled = state.chapter >= book.chapters.length - 1;
+}
+
+/* ============================================================
+   8. 进度记忆
+   ============================================================ */
+function saveProgress() {
+  if (!state.book) return;
+  store.set(PROGRESS_KEY, JSON.stringify({
+    id: state.book.id,
+    chapter: state.chapter,
+    ratio: (() => {
+      const s = $('#scroller');
+      const max = s.scrollHeight - s.clientHeight;
+      return max > 4 ? s.scrollTop / max : 0;
+    })(),
+    ts: Date.now(),
+  }));
+}
+let saveTimer;
+function saveProgressDebounced() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveProgress, 400);
+}
+function loadProgress(id) {
+  try {
+    const raw = store.get(PROGRESS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return p.id === id ? p : null;
+  } catch (_) { return null; }
+}
+
+/* ============================================================
+   9. 打开文件
+   ============================================================ */
+async function openFile(file) {
+  const name = file.name.replace(/\.(epub|txt)$/i, '');
+  const isEpub = /\.epub$/i.test(file.name) || file.type === 'application/epub+zip';
+  setLoading(true, isEpub ? '正在解压 EPUB…' : '正在读取文本…');
+
+  try {
+    const buf = await file.arrayBuffer();
+    let book;
+
+    if (isEpub) {
+      const parsed = await parseEPUB(buf, t => setLoading(true, t));
+      book = parsed;
+    } else {
+      const text = decodeBuffer(buf);
+      if (!text.trim()) throw new Error('文件是空的');
+      const chapters = splitChapters(text);
+      book = chapters
+        ? { title: name, chapters, meta: `TXT · ${chapters.length} 章` }
+        : { title: name, chapters: [{ title: '正文', body: text }], meta: `TXT · ${(text.length / 10000).toFixed(1)} 万字` };
+    }
+
+    book.id = `${file.name}|${file.size}|${file.lastModified}`;
+    book.meta = book.meta || (isEpub ? `EPUB · ${book.chapters.length} 章`
+                                     : `TXT · ${book.chapters.length} 章`);
+    state.book = book;
+    state.chapter = 0;
+
+    // UI 切换
+    $('#empty').classList.add('hidden');
+    $('#bookTitle').textContent = `${book.title} · ${book.meta}`;
+    ['#btnBionic', '#btnTheme', '#btnPanel'].forEach(s => $(s).disabled = false);
+    $('#btnHome').hidden = false;
+    $('#btnBionic').classList.toggle('on', state.prefs.bionic);
+    buildToc();
+    openSidebar();
+
+    const prog = loadProgress(book.id);
+    setLoading(false);
+    await renderChapter(0);
+
+    if (prog && prog.chapter > 0) {
+      await renderChapter(prog.chapter, true);
+      requestAnimationFrame(() => {
+        const s = $('#scroller');
+        const max = s.scrollHeight - s.clientHeight;
+        s.scrollTop = (prog.ratio || 0) * max;
+        toast(`已跳转到上次阅读位置：${book.chapters[prog.chapter]?.title || ''}`);
+      });
+    } else {
+      toast(`已载入《${book.title}》，共 ${book.chapters.length} 章`);
+    }
+  } catch (err) {
+    console.error(err);
+    setLoading(false);
+    toast('打开失败：' + (err.message || err), 4200);
+  }
+}
+
+/* 回到首页（空状态）：清空当前书，恢复初始界面。
+   注意不清除用户偏好设置，只清书与进度显示。 */
+function goHome(confirmFirst = true) {
+  if (!state.book) { $('#fileInput').click(); return; }
+  if (confirmFirst) {
+    const name = state.book.title;
+    if (!window.confirm(`关闭《${name}》并回到首页？\n（阅读进度已保存，下次打开同一本书会自动恢复）`)) return;
+  }
+  // 中止进行中的渲染
+  state.renderToken++;
+  state.book = null;
+  state.chapter = 0;
+
+  $('#reader').replaceChildren();
+  $('#tocList').replaceChildren();
+  $('#tocSearch').value = '';
+  $('#scroller').scrollTop = 0;
+  $('#bookTitle').textContent = '未打开书籍';
+  $('#progress').style.width = '0%';
+  $('#empty').classList.remove('hidden');
+  $('#pager').classList.add('hidden');      // 没书时收起翻页条
+  $('#btnHome').hidden = true;
+  closeSidebar();
+  closePanel();
+  toast('已回到首页，可以打开另一本书', 2000);
+}
+
+/* 示例文本，用于零成本预览效果 */
+async function openDemo() {
+  const demo = `仿生阅读（Bionic Reading）实验说明
+
+仿生阅读是一种通过视觉引导提升阅读效率的排版方式。它的核心做法是把每个单词开头的若干字母加粗或改色，让眼睛先被这几个字母锚定，大脑据此前半段自动补全整个单词，从而减少眼球扫视次数、降低注意力损耗。
+
+This paragraph is written in English so you can compare how the algorithm behaves across different word lengths and alphabets. Notice how the bolded prefix of every word creates an invisible rhythm that guides your eyes forward without conscious effort.
+
+对于注意力容易分散的读者，这种锚定尤其有价值。跳行、走神、反复回读是阅读长文本时最常见的三种损耗，而仿生阅读通过人为制造视觉突出点，让视线在密集的文本上始终"抓得住"某处，从而降低走神概率。
+
+需要说明的是，目前缺乏高质量、可重复的临床证据证明仿生阅读对所有人普遍有效。已有对照研究结果混杂，不少研究发现它对阅读速度的提升有限甚至无提升，主观偏好明显强于客观效益。因此它更适合作为值得一试的个人辅助手段，而非处方级干预。
+
+调节建议
+
+首字母高亮强度控制单词开头被高亮的字母数量。太长会让文本显得断续、破碎，破坏阅读的流畅感；太短则失去锚定作用，和普通加粗文本没有区别。中文和英文的最优参数并不相同，中文单字信息密度高，通常取一到两个字符即可；英文单词较长，取两到四个字母效果更明显。
+
+锚点与正文同号，不做缩放。仿生阅读的视觉入口来自加粗与颜色对比，而不是把字放大；曾尝试过放大锚点，但那会迫使锚点变成独立的盒子，从而打乱中文的换行位置，让整段文字排得参差不齐。所以这里只提供字重与颜色两条路径。
+
+高亮色与词尾色是两组独立的颜色控制。第一排色块决定锚点（也就是每个词开头那几个字）的颜色，第二排决定其余部分的颜色。词尾可以选淡化，也可以指定一个具体颜色。一个实用组合是锚点用暖色、词尾用中性灰，这样对比度自然拉开，又不会让整页显得花。
+
+对齐方式建议保持左对齐。两端对齐会把每行的剩余空隙摊到字与字之间，而锚点处的字重和字号本来就不同，分摊之后空隙会格外显眼，整页看起来四处漏风。汉字是等宽的，左对齐的右边缘其实已经很整齐。
+
+词尾淡化是一个容易被忽略的细节。把未被高亮的部分降低不透明度，会比单纯加粗产生更强的视觉层次，让锚定点的对比度自然拉开。但淡化过度会让文本显得发灰、疲惫，建议保持在百分之四十到百分之六十之间。
+
+阅读宽度的选择同样重要。中文建议每行三十到三十八字，过宽会导致视线在换行时丢失起始位置，跳行概率显著上升。行高建议在一点八到二点二倍之间，给眼睛提供足够的行间缓冲区。
+
+所有改动都会实时生效并自动保存。想换一本书，点左上角书名左边的「换一本」，或者直接按 H 键回到首页。
+
+祝阅读愉快。`;
+
+  const book = {
+    id: 'demo',
+    title: '仿生阅读实验说明',
+    meta: '示例文本',
+    chapters: [{ title: '说明', body: demo }],
+  };
+  state.book = book;
+  state.chapter = 0;
+  $('#empty').classList.add('hidden');
+  $('#bookTitle').textContent = `${book.title} · 示例文本`;
+  ['#btnBionic', '#btnTheme', '#btnPanel'].forEach(s => $(s).disabled = false);
+    $('#btnHome').hidden = false;
+  buildToc();
+  openSidebar();
+  await renderChapter(0);
+  toast('这是示例文本，拖入你自己的 EPUB / TXT 看真实效果');
+}
+
+/* ============================================================
+   10. 导出
+   ============================================================ */
+function exportHTML() {
+  const book = state.book;
+  if (!book) return;
+  const p = state.prefs;
+
+  const ink = p.theme === 'dark' ? '#e6e4df' : (p.theme === 'sepia' ? '#3b3226' : '#1c1b19');
+  const paper = p.theme === 'dark' ? '#16171a' : (p.theme === 'sepia' ? '#f4ecd8' : '#fbfaf7');
+  const headColor = p.mode === 'bold' ? ink : p.tint;
+  // 合成加粗补偿：导出的静态 HTML 也要带上，否则分享出去的字距又会被撑开。
+  // 用当前已实测到的值（applyPrefs 已算过并存进 CSS 变量）。
+  const exportHeadLs = document.documentElement.style.getPropertyValue('--head-ls') || '0';
+
+  const css = `*{box-sizing:border-box}
+:root{--head-weight:${p.mode === 'color' ? 400 : 700};
+--bionic-tint:${p.tint};--head-color:${headColor};
+--head-ls:${exportHeadLs};
+--tail-color:${p.tailColor};--tail-opacity:${(p.tail / 100).toFixed(2)}}
+body{max-width:${p.width}em;margin:0 auto;padding:48px 24px;
+font-family:${FONTS[p.font]};font-size:${p.size}px;line-height:${(p.lh / 10).toFixed(2)};
+letter-spacing:.012em;font-synthesis-weight:auto;
+/* 导出件一律用纯色底：这张背景图是本机的相对路径文件，
+   分享出去对方没有它，引用会 404。保持纯色最稳。 */
+color:${ink};background:${paper}}
+h1{font-size:1.5em;text-align:center;margin:0 0 1.6em}
+h2{font-size:1.2em;margin:2em 0 .8em;padding-bottom:.3em;opacity:.8}
+h3{font-size:1.05em;margin:1.6em 0 .7em}
+p{margin:0 0 ${(p.para / 10).toFixed(2)}em;text-indent:2em;
+text-align:${p.align === 'justify' ? 'justify' : 'left'}${
+  p.align === 'justify' ? ';text-align-last:left;text-justify:inter-ideograph' : ''}}
+/* 锚点：恒为普通内联，不缩放、不改字号。
+   曾经在 headSize≠100 时输出 display:inline-block + transform:scale()，
+   那会把锚点变成原子盒、在两侧无条件加断行机会，把中文整段排乱
+   （CSSWG#4576）。锚点缩放已整体移除，导出也不再包含它。 */
+.br-head{font-weight:var(--head-weight);color:var(--head-color);
+font-size:1em;letter-spacing:inherit;padding:0;word-spacing:normal;
+/* ★ margin-inline-end 必须排在最后：它是实测的合成加粗补偿。
+   前面若出现 margin-inline 简写，会把这里覆盖成 0（导出路径曾踩过这个坑）。 */
+margin-inline-end:var(--head-ls,0px)}
+.br-tail{opacity:var(--tail-opacity);color:${p.tailColor};
+font-weight:400;font-size:1em;letter-spacing:inherit;padding:0;margin:0}
+@media print{body{padding:0;max-width:none}}
+@page{margin:20mm}`;
+
+  const escapeHTML = s => s.replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+
+  let body = `<h1>${escapeHTML(book.title)}</h1>`;
+  book.chapters.forEach(ch => {
+    body += `<h2>${escapeHTML(ch.title)}</h2>`;
+    const paras = ch.paras || (ch.paras = toParagraphs(ch.body));
+    for (const para of paras) {
+      if (para.type === 'h3') { body += `<h3>${escapeHTML(para.text)}</h3>`; continue; }
+      const inner = p.bionic
+        ? bionicToHTML(para.text, p.strength, escapeHTML)   // 与屏幕渲染共用同一套算法
+        : escapeHTML(para.text);
+      body += `<p>${inner}</p>`;
+    }
+  });
+
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHTML(book.title)} · 仿生阅读</title>
+<style>${css}</style></head><body>${body}</body></html>`;
+
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${book.title} - 仿生阅读.html`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast('已导出，可直接分享或打印为 PDF');
+}
+
+/* ============================================================
+   11. 面板 / 侧栏开关
+   ============================================================ */
+const isMobile = () => window.innerWidth <= 820;
+function openSidebar()  { $('#sidebar').classList.remove('hidden');  if (isMobile()) $('#backdrop').classList.add('on'); }
+function closeSidebar() { $('#sidebar').classList.add('hidden');     $('#backdrop').classList.remove('on'); }
+function toggleSidebar(){ $('#sidebar').classList.contains('hidden') ? openSidebar() : closeSidebar(); }
+function openPanel()    { $('#panel').classList.remove('hidden');    if (window.innerWidth <= 1080) $('#backdrop').classList.add('on'); }
+function closePanel()   { $('#panel').classList.add('hidden');       $('#backdrop').classList.remove('on'); }
+function togglePanel()  { $('#panel').classList.contains('hidden') ? openPanel() : closePanel(); }
+
+/* ============================================================
+   12. 事件绑定
+   ============================================================ */
+function bind() {
+  // 主题色块（锚点色）
+  const sw = $('#swatches');
+  TINTS.forEach(c => {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.dataset.color = c;
+    b.style.background = c;
+    b.title = c;
+    sw.appendChild(b);
+  });
+
+  // 词尾色块：一个「跟随」+ 常用颜色
+  const tsw = $('#tailSwatches');
+  {
+    const f = document.createElement('button');
+    f.className = 'swatch follow';
+    f.dataset.tail = 'follow';
+    f.textContent = '淡化';
+    f.title = '词尾不做改色，只用淡化';
+    tsw.appendChild(f);
+    TAIL_COLORS.forEach(c => {
+      const b = document.createElement('button');
+      b.className = 'swatch';
+      b.dataset.color = c;
+      b.dataset.tail = 'custom';
+      b.style.background = c;
+      b.title = c;
+      tsw.appendChild(b);
+    });
+  }
+
+  // --- 顶栏 ---
+  $('#btnSidebar').onclick = toggleSidebar;
+  $('#btnCloseSide').onclick = closeSidebar;
+  $('#btnPanel').onclick = togglePanel;
+  $('#backdrop').onclick = () => { closeSidebar(); closePanel(); };
+
+  $('#btnBionic').onclick = () => {
+    state.prefs.bionic = !state.prefs.bionic;
+    $('#btnBionic').classList.toggle('on', state.prefs.bionic);
+    savePrefs();
+    if (state.book) {
+      rerenderPreservingScroll();
+      toast(state.prefs.bionic ? '仿生阅读已开启' : '仿生阅读已关闭', 1400);
+    } else {
+      // 没有打开书时也要有反馈，否则用户以为按钮坏了
+      toast(state.prefs.bionic
+        ? '仿生阅读已设为开启（先导入一本书才能看到效果）'
+        : '仿生阅读已关闭', 2600);
+      $('#btnDemo').focus?.();
+    }
+  };
+
+  const THEMES = ['light', 'sepia', 'dark'];
+  $('#btnTheme').onclick = () => {
+    const i = THEMES.indexOf(state.prefs.theme);
+    state.prefs.theme = THEMES[(i + 1) % THEMES.length];
+    applyPrefs();
+    toast('主题：' + { light: '亮色', sepia: '护眼', dark: '暗色' }[state.prefs.theme], 1400);
+  };
+
+  // --- 设置面板 ---
+  $('#segMode').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.prefs.mode = b.dataset.mode;
+    applyPrefs();
+    // 仅样式变化，无需重绘 DOM（CSS 变量已切换）
+  };
+  $('#segFont').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.prefs.font = b.dataset.font; applyPrefs();
+  };
+  $('#segTheme').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.prefs.theme = b.dataset.theme; applyPrefs();
+  };
+  $('#segAlign').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.prefs.align = b.dataset.align;
+    // 用户此刻明确表达了对齐偏好 → 打上标记，以后启动不再迁移覆盖
+    state.prefs.alignMigrated = true;
+    applyPrefs();
+  };
+  // 阅读背景：纯色 / 背景图（切换只改 html[data-bg]，不重绘正文）
+  $('#segBg').onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.prefs.bg = b.dataset.bg === 'image' ? 'image' : 'plain';
+    applyPrefs();
+  };
+  $('#swatches').onclick = e => {
+    const b = e.target.closest('.swatch'); if (!b) return;
+    state.prefs.tint = b.dataset.color;
+    // 选了锚点色，但当前是「加粗」模式，颜色不会显现 —— 自动切到混合模式
+    if (state.prefs.mode === 'bold') state.prefs.mode = 'mix';
+    applyPrefs();
+  };
+  $('#tintPicker').oninput = e => {
+    state.prefs.tint = e.target.value;
+    if (state.prefs.mode === 'bold') state.prefs.mode = 'mix';
+    applyPrefs();
+  };
+  $('#tailSwatches').onclick = e => {
+    const b = e.target.closest('.swatch'); if (!b) return;
+    if (b.dataset.tail === 'follow') {
+      state.prefs.tailMode = 'follow';
+    } else {
+      state.prefs.tailMode = 'custom';
+      state.prefs.tailColor = b.dataset.color;
+    }
+    applyPrefs();
+  };
+  $('#tailPicker').oninput = e => {
+    state.prefs.tailColor = e.target.value;
+    state.prefs.tailMode = 'custom';
+    applyPrefs();
+  };
+
+  // 滑块：strength 需要重绘，其余只改 CSS 变量
+  const live = (id, key, fn) => {
+    $(id).addEventListener('input', e => {
+      fn(+e.target.value);
+      applyPrefs();
+    });
+  };
+  live('#rStrength', 'strength', v => {
+    state.prefs.strength = v;
+    if (state.book) rerenderPreservingScroll();   // 前缀长度变了，必须重绘
+  });
+  live('#rTail',  'tail',  v => state.prefs.tail = v);
+  live('#rSize',  'size',  v => state.prefs.size = v);
+  live('#rLh',    'lh',    v => state.prefs.lh = v);
+  live('#rPara',  'para',  v => state.prefs.para = v);
+  live('#rWidth', 'width', v => state.prefs.width = v);
+
+  // --- 操作 ---
+  $('#btnExport').onclick = exportHTML;
+  $('#btnReset').onclick = () => {
+    state.prefs = { ...DEFAULTS };
+    applyPrefs();
+    if (state.book) rerenderPreservingScroll();
+    toast('已恢复默认设置');
+  };
+
+  // --- 空状态 ---
+  $('#btnPick').onclick = () => $('#fileInput').click();
+  $('#btnDemo').onclick = openDemo;
+  // 回到首页 / 换一本书
+  $('#btnHome').onclick = () => goHome(true);
+  $('#btnBrand').onclick = () => goHome(true);
+  $('#btnHome2').onclick = () => {
+    if (state.book) goHome(true);
+    else $('#fileInput').click();
+  };
+  $('#fileInput').onchange = e => {
+    const f = e.target.files?.[0];
+    if (f) openFile(f);
+    e.target.value = '';
+  };
+
+  // --- 目录点击 ---
+  $('#tocList').onclick = e => {
+    const b = e.target.closest('.toc-item'); if (!b) return;
+    goChapter(+b.dataset.idx, true);
+  };
+  let tocTimer;
+  $('#tocSearch').oninput = e => {
+    clearTimeout(tocTimer);
+    tocTimer = setTimeout(() => buildToc(e.target.value), 140);
+  };
+
+  // --- 底部章节条 ---
+  $('#pgNextCh').onclick = () => nextChapter();
+  $('#pgPrevCh').onclick = () => prevChapter();
+
+  // 滚动时同步翻页条（章内百分比、按钮可用性）
+  $('#scroller').addEventListener('scroll', () => updatePager(), { passive: true });
+
+  // --- 拖放 ---
+  const card = $('#dropCard');
+  let dragDepth = 0;
+  const overlay = $('#dropOverlay');
+  const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+
+  window.addEventListener('dragenter', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth++;
+    overlay.classList.add('on');
+    if (!state.book) card.classList.add('over');
+  });
+  window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener('dragleave', e => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) { overlay.classList.remove('on'); card.classList.remove('over'); }
+  });
+  window.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    overlay.classList.remove('on'); card.classList.remove('over');
+    const f = e.dataTransfer.files?.[0];
+    if (f) openFile(f);
+  });
+
+  // --- 滚动 ---
+  $('#scroller').addEventListener('scroll', () => {
+    updateProgress();
+    saveProgressDebounced();
+  }, { passive: true });
+
+  // --- 快捷键 ---
+  window.addEventListener('keydown', e => {
+    const typing = /^(INPUT|TEXTAREA)$/.test(e.target.tagName) || e.target.isContentEditable;
+    if (typing && e.key !== 'Escape') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    switch (e.key) {
+      case 'Escape':
+        closePanel(); closeSidebar();
+        if (typing) e.target.blur();
+        break;
+      case 'b': case 'B': $('#btnBionic').disabled || $('#btnBionic').click(); break;
+      case 't': case 'T': $('#btnTheme').disabled  || $('#btnTheme').click();  break;
+      case 'p': case 'P': $('#btnPanel').disabled  || $('#btnPanel').click();  break;
+      case 's': case 'S': state.book && toggleSidebar(); break;
+      case 'h': case 'H': goHome(state.book ? true : false); break;
+      /* ★ 翻章为唯一的翻页动作（没有"翻屏"）。
+         所以方向键、PgUp/PgDn、空格全部走"上一章/下一章"，
+         与底部条的两个按钮完全一致 —— 不给用户两套语义。
+         Home/End 仍保留"回到章首/跳到章末"（章内定位，不影响章节切换）。 */
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp':
+        if (state.book) { e.preventDefault(); prevChapter(); } break;
+      case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ':
+        if (state.book) { e.preventDefault(); nextChapter(); } break;
+      case 'Home':       if (state.book) { e.preventDefault(); $('#scroller').scrollTop = 0; updatePager(); } break;
+      case 'End':        if (state.book) {
+                           e.preventDefault();
+                           const sc = $('#scroller');
+                           sc.scrollTop = sc.scrollHeight;
+                           updatePager();
+                         } break;
+    }
+  });
+
+  // 窗口尺寸变化时清理 backdrop
+  let rTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(rTimer);
+    rTimer = setTimeout(() => {
+      if (window.innerWidth > 1080) $('#backdrop').classList.remove('on');
+    }, 120);
+  });
+}
+
+/* ============================================================
+   13. 启动
+   ============================================================ */
+function init() {
+  loadPrefs();
+  bind();
+  applyPrefs();
+  buildToc();
+  // 首次打开：桌面端展开目录，收起设置面板
+  if (!isMobile()) openSidebar();
+  requestAnimationFrame(updateProgress);
+}
+
+document.readyState === 'loading'
+  ? document.addEventListener('DOMContentLoaded', init)
+  : init();
+
+})();
+</script>
+</body>
+</html>
