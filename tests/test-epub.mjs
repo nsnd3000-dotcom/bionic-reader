@@ -1,5 +1,5 @@
 // 用真实 EPUB 文件端到端验证解析器（含真实 JSZip）
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import JSZip from 'jszip';
 
@@ -92,7 +92,17 @@ async function buildEPUB() {
 </body></html>`);
 
   const buf = await zip.generateAsync({ type: 'uint8array' });
-  writeFileSync(new URL('./fixture.epub', import.meta.url), buf);
+  /* ★ 只在样本不存在时才写盘。
+     这个文件是"权威样本"：test-epub-toc.mjs 与 test-ui.mjs 都会读它。
+     但早先这里无条件 writeFileSync，于是**每跑一次测试就重写一遍**，
+     后果有两个：
+       1) 工作区永远不干净 —— `git status` 总显示 tests/fixture.epub 被改，
+          新用户跑完测试会以为改坏了什么；
+       2) 测试之间通过文件产生隐式耦合，动手改样本时容易互相影响。
+     样本本身由本文件定义，只要仓库里有（已提交）就不必重新生成。 */
+  if (!existsSync(new URL('./fixture.epub', import.meta.url))) {
+    writeFileSync(new URL('./fixture.epub', import.meta.url), buf);
+  }
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 

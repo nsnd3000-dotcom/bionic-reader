@@ -14,13 +14,27 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # ★ 必须是 22.22+ / 24.x —— 不能降到 20。
+          #   tests/ 用的 jsdom 30 声明 engines 为
+          #     "^22.22.2 || ^24.15.0 || >=26.0.0"
+          #   而它依赖的 undici 又是 ">=22.19.0"。
+          #   曾经这里写 node-version: '20'，CI 一加载 jsdom 就崩：
+          #     webidl.util.markAsUnclonable is not a function
+          #   注意那是"依赖不支持该 Node"的报错，不是代码问题 ——
+          #   降 jsdom 版本也能绕过，但会让 CI 与本地开发环境不一致，
+          #   所以这里选择把 Node 提上去。
+          node-version: '22'
 
-      # tests/ 用 jsdom + jszip，都是纯 JS，无需浏览器
-      - name: 安装测试依赖
-        run: npm install jsdom jszip --no-save --no-audit --no-fund
+      # ★ 用 `npm ci` 而不是 `npm install`：
+      #   它严格按 package-lock.json 安装，版本完全可复现。
+      #   曾经用 `npm install jsdom jszip --no-save`，每次解析到
+      #   undici 的最新 8.x，那个版本用到 Node 20 里不存在的 API
+      #   （webidl.util.markAsUnclonable），在 CI 上直接崩，
+      #   而本地因为锁在 8.11.2 而正常 —— 典型的"在我机器上能跑"。
+      - name: 安装测试依赖（严格按 lock 文件）
+        run: npm ci --no-audit --no-fund
 
-      # test-perf.mjs 与 test-epub-toc.mjs 依赖这个体积样本，先生成
+      # test-perf.mjs 与 test-epub-toc.mjs 依赖这个体积样本
       - name: 生成压力测试用的 EPUB
         run: node tests/make-big-epub.mjs
 

@@ -471,6 +471,46 @@ const isGroupHeading = nextDepth > m.depth;   // “后面那条更深 → 我�
 
 **教训**：用"相邻元素的相对位置"去推断层级，只在同一容器内成立。层级信息应该在**解析树的时候**就抽出来，别等到切片阶段再猜。
 
+### 15. CI 在 Node 20 上崩掉，并不是代码问题
+
+首次推上 GitHub 后，Actions 在「跑全部测试」这一步挂了：
+
+```
+跑 18 个测试文件（同进程顺序执行）
+  test-align.mjs            💥 webidl.util.markAsUnclonable is not a function
+TypeError: webidl.util.markAsUnclonable is not a function
+    at new CacheStorage (.../undici/lib/web/cache/cachestorage.js:20:17)
+    at Object.<anonymous> (.../jsdom/lib/api.js:12:33)
+Node.js v20.20.2
+```
+
+**第一个测试文件都还没跑起来就崩了** —— 报错发生在 `require('jsdom')` 的那一刻，
+跟项目代码无关。根因是**依赖链要求的 Node 版本比 CI 配的高**：
+
+| 依赖 | 声明的 engines |
+|---|---|
+| `jsdom@30.1.2`（tests 直接用） | `^22.22.2 \|\| ^24.15.0 \|\| >=26.0.0` |
+| `undici@8.11.2`（jsdom 的依赖） | `>=22.19.0` |
+
+而 CI 当时写的是 `node-version: '20'`。**Node 20 装得上这些包，但一加载就崩** ——
+`undici` 用到了 Node 20 里还不存在的 API。
+
+**排查过程中走了个弯路**，值得记下来：第一反应是"CI 每次 `npm install` 装到了更新的
+`undici`，而本地锁在旧版"，于是加了 `package-lock.json`、CI 改用 `npm ci`。
+**这个改动本身是对的**（没锁文件确实会让版本漂移），但**没治到病** ——
+真正的原因是版本要求不匹配，锁死版本后 Node 20 依然崩。
+
+**修法：**
+
+1. CI 的 Node 提到 `22`（与 `jsdom@30` 的要求对齐）
+2. `package.json` 加 `"engines": { "node": ">=22.22.0" }`，让不兼容的环境**在安装阶段就报错**，而不是等到运行时抛一个看不懂的 `TypeError`
+3. `package-lock.json` 提交进仓库，CI 用 `npm ci` 而非 `npm install`
+
+**教训有两条：**
+
+- **依赖的 `engines` 声明必须读**。`npm install` 不会因为 engines 不满足就失败（除非开 `engine-strict`），于是不兼容会推迟到运行时，表现为完全无关的报错。
+- 遇到"本地能跑、CI 不能跑"，**先比环境再改代码**。这次本地是 Node 24、CI 是 Node 20，一眼就能看出的差异，却是加了锁文件之后才回头注意到的。
+
 ### 其他限制
 
 - EPUB 需要联网加载 JSZip（约 100 KB，配了 3 个 CDN 自动回退）
@@ -484,13 +524,30 @@ const isGroupHeading = nextDepth > m.depth;   // “后面那条更深 → 我�
 
 ### 准备环境
 
-```powershell
-cd bionic-reader\tests
-npm install jsdom jszip --no-save
+**Node 版本要求：≥ 22.22.0。**
+
+这不是随便定的 —— `tests/` 用的 `jsdom@30` 声明 `engines` 为
+`^22.22.2 || ^24.15.0 || >=26.0.0`，它依赖的 `undici` 又要求 `>=22.19.0`。
+**在 Node 20 上装依赖能成功，但一 `require('jsdom')` 就崩**：
+
+```
+TypeError: webidl.util.markAsUnclonable is not a function
 ```
 
+这个报错看起来像代码问题，实际是**依赖不支持该 Node 版本**。本项目一度把
+CI 配成 Node 20，就踩了这条（见[已知问题 15](#15-ci-在-node-20-上崩掉并不是代码问题)）。
+
+```powershell
+node --version          # 先确认 ≥ v22.22.0
+cd bionic-reader
+npm ci                  # 按 package-lock.json 精确安装
+```
+
+> `package-lock.json` **必须提交**。曾把它放进 `.gitignore`，导致 CI 每次
+> 都去解析依赖的最新版本，而本地恰好锁在可用版本上 —— 典型的"在我机器上能跑"。
+>
 > 若 npm 报 `EPERM`（沙箱限制缓存目录），指定工作区内的缓存：
-> `npm install jsdom jszip --no-save --cache ..\.npm-cache`
+> `npm ci --cache ..\.npm-cache`
 
 ### 运行测试
 
@@ -498,7 +555,6 @@ npm install jsdom jszip --no-save
 
 ```powershell
 cd bionic-reader
-npm install jsdom jszip --no-save    # 首次需要
 npm test                             # = node tests/run-all.mjs
 ```
 

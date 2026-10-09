@@ -1,6 +1,12 @@
 # 依赖
 node_modules/
-package-lock.json
+
+# ★ package-lock.json 必须**提交**。
+#   曾经这里忽略了它，结果 CI 上 `npm install jsdom` 每次解析到
+#   undici 的最新 8.x —— 那个版本用了 Node 20 还没有的 API
+#   （webidl.util.markAsUnclonable），在 CI 上直接 TypeError 崩掉，
+#   而本地因为装的恰好是 8.11.2 而安然无恙。
+#   锁文件钉死整棵依赖树，才能保证"本地能跑 = CI 能跑"。
 
 # 生成的测试样本
 # big.epub 由 `node tests/make-big-epub.mjs` 生成（140KB，不必进仓库）；
