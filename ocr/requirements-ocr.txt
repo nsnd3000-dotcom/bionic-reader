@@ -1,0 +1,12 @@
+# OCR 桥接脚本的依赖
+# 安装：python -m pip install -r ocr/requirements-ocr.txt
+#
+# 说明：
+#   pymupdf               读写 PDF、渲染页面、写入不可见文字层
+#   rapidocr-onnxruntime  OCR 引擎（自带中英文模型，首次运行自动下载）
+#
+# 不依赖 tesseract，也不依赖 Windows 自带 OCR（后者在无包身份的进程里不可用，
+# 详见 README-ocr.md 第 1 节）。
+
+pymupdf>=1.24
+rapidocr-onnxruntime>=1.2

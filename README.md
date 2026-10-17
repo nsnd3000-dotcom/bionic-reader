@@ -1,9 +1,9 @@
 # Bionic Reader · 仿生阅读器
 
-> 一个**单文件**网页阅读器：导入本地 EPUB / TXT，用**仿生阅读（Bionic Reading）**方式重新排版。
+> 一个**单文件**网页阅读器：导入本地 EPUB / TXT / PDF，用**仿生阅读（Bionic Reading）**方式重新排版。
 > 针对 ADHD 阅读时的跳行、走神、回读问题设计。
 
-**交付物只有一个文件：`index.html`**（约 130 KB，双击即可运行）
+**交付物只有一个文件：`index.html`**（约 150 KB，双击即可运行）
 
 ---
 
@@ -16,6 +16,7 @@
 - [仿生阅读算法原理](#仿生阅读算法原理)
 - [性能实测](#性能实测)
 - [已知问题与设计决策](#已知问题与设计决策)
+- [PDF 阅读（原版式）](#pdf-阅读原版式)
 - [开发与测试](#开发与测试)
 - [源码结构导览](#源码结构导览)
 - [待办与扩展方向](#待办与扩展方向)
@@ -82,9 +83,20 @@ bionic-reader/
 ├── bg-arches.jpg               ← 阅读页可选背景（拱廊）
 ├── preview-*.png               ← 效果预览图
 ├── 接续说明.md                  ← 开发日志：踩过的坑与归因记录
+├── pdf/                        ← PDF 支持的文档（运行时不依赖，可删）
+│   └── README-pdf.md               设计要点、cMaps 陷阱、已知限制
+│                                   （代码在 index.html 的 3b 节，此处不留副本）
+├── ocr/                        ← 扫描件 OCR 桥接（**可选**，可整个删掉）
+│   ├── README-ocr.md               为什么需要、怎么用、踩过的坑
+│   ├── requirements-ocr.txt        pip 依赖
+│   ├── pdf_ocr.py                  扫描件 PDF → 带文字层 PDF
+│   ├── rapidocr.py                 RapidOCR 封装（图片 → 带坐标文本框）
+│   ├── render_pdf.py               PDF 页面渲染成 PNG（调试用）
+│   └── winocr.py                   Windows OCR 封装（本机不可用，留作参考）
 └── tests/                      ← 测试与工具（发布时可整个删除）
     ├── run-all.mjs                 汇总入口（npm test）
     ├── test.mjs                (80) 核心算法与文本解析
+    ├── test-pdf.mjs            (127) PDF 原版阅读器 + 集成约定
     ├── test-anchors.mjs        (56) 中文锚点规则（标点切分 + 句中词）
     ├── test-spacing.mjs        (42) 字距与对齐（防空白回归）
     ├── test-spacing-e2e.mjs    (23) 真实 DOM 下的字距与导出一致性
@@ -116,7 +128,7 @@ bionic-reader/
 > `big.epub`（140KB 压力测试用）已在 `.gitignore` 中排除，
 > 克隆后跑一次 `node tests/make-big-epub.mjs` 生成即可。
 
-**测试总计 674 项（不含 `test-perf.mjs` 的 9 项性能断言），当前全部通过。**
+**测试总计 801 项（不含 `test-perf.mjs` 的 9 项性能断言），当前全部通过。**
 运行 `npm test`（即 `node tests/run-all.mjs`）可一次跑完并汇总。
 
 ---
@@ -126,6 +138,7 @@ bionic-reader/
 ### 导入
 - **EPUB**：解析 `container.xml` → OPF → manifest/spine，按章节拆分，自动跳过封面页与目录页，支持子目录路径与 XML 实体
 - **TXT**：自动嗅探编码（UTF-8 / UTF-8 BOM / UTF-16LE / UTF-16BE / GBK），按「第 N 章」「Chapter N」等标题切分章节
+- **PDF**：接 `pdf.js`（CDN 延迟加载），走**原版式阅读**（类似 SumatraPDF），不重排、不丢版面。缩放 / 翻页 / 页码跳转齐备；扫描件**直接能看**，有文字层时还能开**锚点式文字高亮**（只突出少数几个字，见下）。详见 [PDF 阅读（原版式）](#pdf-阅读原版式)
 - **拖放**：文件拖到页面任意位置即可导入
 - 内置**示例文本**，零成本预览效果
 
@@ -514,9 +527,99 @@ Node.js v20.20.2
 ### 其他限制
 
 - EPUB 需要联网加载 JSZip（约 100 KB，配了 3 个 CDN 自动回退）
+- PDF 需要联网加载 pdf.js（约 350 KB）与 cMaps（按需拉取）
 - 纯图片版 EPUB（漫画）无文本可提取，会明确报错
+- **扫描件 PDF 能看但不能高亮**（没有文字层可定位），要高亮需先用 `ocr/` 补文字层
 - 加密 EPUB（DRM）不支持
 - 暂无 PWA / 离线缓存
+
+---
+
+## PDF 阅读（原版式）
+
+PDF 走的是**另一条路**：不重排，按原版式显示，像 SumatraPDF 那样。
+
+### 为什么不做重排
+
+早期版本把 PDF 抽成文本再重排，实测两头不讨好：
+
+- **扫描件**要先跑 30 分钟 OCR 才能读
+- **文字型 PDF** 会被拆掉表格、公式、图注、分栏
+
+改成原版式之后，扫描件**开箱即读**（看的就是原图），排版 100% 还原，
+有文字层的还能选中复制。所以**整条重排 PDF 的实现已被移除**。
+
+EPUB / TXT 仍然走重排阅读 —— 它们本来就是 HTML / 纯文本，重排是天经地义的。
+
+| | EPUB / TXT | PDF |
+|---|---|---|
+| 阅读方式 | 重排（可调字号/行距/宽度） | **原版式**（缩放、翻页） |
+| 仿生阅读 | ✅ 词首加粗 / 变色 | ⚠️ 锚点色带（加粗做不到，见下） |
+| 扫描件 | 纯图片会明确报错 | ✅ **直接能看** |
+
+### 高亮是"锚点式"，不是整行糊底色
+
+**硬限制**：在 PDF 上做不到"把词首字母加粗"—— 页面文字已经**栅格化进
+canvas 的像素**里了，没法只把某几个字母变粗。任何基于 pdf.js 的阅读器都一样。
+
+**但"只高亮几个字"可以做到**，效果与仿生阅读等价：
+把每个文字块拆成单字 span，只给**锚点字**加色带。
+
+锚点用的是**和 EPUB/TXT 完全同一套**算法（`computeHanAnchors`：
+标点切分 + 分词器 + 虚词表 + 间隔表），强度也跟随用户设置 ——
+所以在 PDF 上调"高亮强度"的行为与其他格式一致。
+
+**英文另有规则**：中文那套建立在"没有空格、靠标点和虚词透出词边界"上，
+对拉丁词完全失效（实测纯英文 PDF 每行只有 1 个锚点）。
+所以单独补了一条 —— **每个英文词标前 1~2 个字母**
+（强度 1~2 档标 1 个，3~5 档标 2 个），
+`Bionic reading` → <b>Bi</b>onic <b>re</b>ading。
+
+**颜色和浓淡都能调**（设置面板 → "PDF 高亮"）：黄/绿/红/蓝/紫/橙 六色 +
+任意取色，不透明度 8%~60%（默认 22%）。底色是压在原图之上的，
+调太浓会妨碍阅读 —— 早期写死 `rgba(255,214,0,.55)` 就是"太黄了"。
+改完**立刻生效**，不用重开 PDF。
+
+**扫描件勾了高亮不会有反应，这是正常的。** 界面会说明原因：
+开关旁显示 **「（本页无文字层）」**，悬停有完整提示与解决办法。
+**扫描件不高亮也照样能正常读**，只是没有色带而已 ——
+阅读器不会因为"没有文字层"就拒绝打开。
+
+> 注意：打开时的"文字层检测"是**抽样**，会漏。
+> 所以它只用来生成提示，不用来禁用功能，也不断言"这是扫描件"。
+> 真正的依据是**逐页实测**（翻过的页里有没有文字块）。
+
+### 两个必须知道的坑
+
+**1. 中文 PDF 不给 cMaps 会静默抽出 0 字符。**
+中文 PDF 几乎都用 Type0 复合字体 + `UniGB-*` 编码，pdf.js 不内置这些 CMap。
+不配 `cMapUrl` 时：不报错、英文正常、中文整页 0 字符。
+**这个现象和"这是扫描件"完全一样**，极易误判。实测一本带文字层的 PDF
+不加 cMaps 时 325 页全部 0 字符，加上立刻恢复。
+
+**2. 必须做可视区渲染。**
+325 页 × 每页约 8MB 位图 ≈ 2.6GB，全渲染必崩。
+现在只为视口附近的页建 canvas，离开就销毁（保留占位高度）。
+实测同时存活的 canvas **只有 2~3 张**。
+
+完整的实现要点与踩坑记录见 [pdf/README-pdf.md](pdf/README-pdf.md)；
+给扫描件补文字层见 [ocr/README-ocr.md](ocr/README-ocr.md)。
+
+### 快捷键
+
+| 操作 | 键 |
+|---|---|
+| 上一页 / 下一页 | `↑` `↓` `PgUp` `PgDn` `空格` |
+| 首页 / 末页 | `Home` / `End` |
+| 放大 / 缩小 | `+` / `-` |
+| 回首页 / 换书 | `H` |
+
+工具栏还有：适应宽度 / 适应整页 / 页码直接跳转 / 文字高亮开关。
+阅读位置按文件记忆，下次打开自动跳回。
+
+> PDF 模式下 **设置面板照常可打开** —— 高亮颜色/不透明度就在里面。
+> 只是「仿生阅读」「排版」两节会收起来（那些参数对 PDF 无效），
+> 顶栏的「仿生」开关会被禁用（加粗做不到，留着会误导）。
 
 ---
 
@@ -551,7 +654,7 @@ npm ci                  # 按 package-lock.json 精确安装
 
 ### 运行测试
 
-最省事的方式（一次跑完 18 个文件并汇总）：
+最省事的方式（一次跑完 19 个文件并汇总）：
 
 ```powershell
 cd bionic-reader
@@ -568,6 +671,7 @@ node test.mjs                # 核心算法与文本解析（80 项）
 node test-epub.mjs           # EPUB 端到端解析（17 项）
 node test-epub-toc.mjs       # nav.xhtml / toc.ncx 目录解析（17 项）
 node test-epub-split.mjs     # 按目录条目切分章节 + 分组标题识别（22 项）
+node test-pdf.mjs            # PDF 原版阅读器 + 与 index.html 的集成约定（127 项）
 node test-chapters.mjs       # 章节标题正则边界（39 项）
 node test-anchors.mjs        # 中文锚点规则（56 项）
 node test-spacing.mjs        # 字距与对齐（42 项）
@@ -620,7 +724,7 @@ python measure-kerning.py       # 量当前系统上"加粗前后字宽差"
 
 ## 源码结构导览
 
-`index.html` 内部按注释分了 13 段，搜索 `====` 可快速跳转：
+`index.html` 内部按注释分了 14 段，搜索 `====` 可快速跳转：
 
 | 段 | 内容 | 关键函数 |
 |---|---|---|
@@ -628,6 +732,7 @@ python measure-kerning.py       # 量当前系统上"加粗前后字宽差"
 | 1 | **仿生阅读核心算法** | `prefixLen` `computeHanAnchors` `hanRuns` `splitHanRun` `bionicFragment` `bionicToHTML` |
 | 2 | TXT 解析 | `decodeBuffer` `splitChapters` `toParagraphs` |
 | 3 | EPUB 解析 | `loadJSZip` `stripTags` `unescapeXML` `parseNavDoc` `parseNcx` `parseEPUB` |
+| **3b** | **PDF 原版阅读器** | `loadPDFJS` `openPDFViewer` `_pdfRenderPage` `_pdfUnrenderPage` `_pdfSetupObserver` `_pdfGotoPage` `_pdfRescale` |
 | 4 | 应用状态 | `DEFAULTS` `state` `FONTS` `TINTS` `TAIL_COLORS` |
 | 5 | 偏好读写与样式应用 | `store` `loadPrefs` `savePrefs` `applyPrefs` `syncControls` |
 | 6 | 渲染 | `renderChapter` `rerenderPreservingScroll` `updateProgress` |
@@ -656,6 +761,12 @@ python measure-kerning.py       # 量当前系统上"加粗前后字宽差"
 | 换正文字体候选 | `FONTS` |
 | 改章节识别规则 | `CHAPTER_RE` |
 | 改分组标题（多级目录）判定 | `parseNavDoc` / `parseNcx` 里的 `hasChildren` 标记 |
+| 换 pdf.js 版本 / CDN | `PDFJS_VERSION` / `PDFJS_ESM_CDNS` / `PDFJS_UMD_CDNS` |
+| 改 PDF 的虚拟化范围（露白/内存） | `_pdfSetupObserver` 里的 `rootMargin` |
+| 改 PDF 页面的渲染/销毁逻辑 | `_pdfRenderPage` / `_pdfUnrenderPage` |
+| 改 PDF 高亮样式/默认色 | CSS 的 `body.pdf-hl .pdf-tl span.pdf-anchor`、`HL_COLORS`、`DEFAULTS.hlColor/hlAlpha` |
+| 改 PDF 缩放模式 | `_pdfComputeScale` / `_pdfFitScale` |
+| 改 PDF 阅读进度的存储 | `PDF_PROGRESS_KEY` / `savePDFProgress` |
 | 改排版样式 | 顶部 CSS 变量区（`:root`） |
 | 改锚点/词尾的字距行为 | CSS 里的 `.br-head` / `.br-tail` |
 
@@ -669,17 +780,27 @@ python measure-kerning.py       # 量当前系统上"加粗前后字宽差"
 
 ### 完全离线
 
-把 JSZip 下载到本地，改 `JSZIP_CDNS` 为相对路径：
+把 JSZip 与 pdf.js 下载到本地，改成相对路径：
 
 ```powershell
-# 下载到 bionic-reader/vendor/jszip.min.js
+# 下载到 bionic-reader/vendor/ 下：
+#   jszip.min.js
+#   pdf.min.mjs + pdf.worker.min.mjs + cmaps/（中文 PDF 必须）
 $JSZIP_CDNS = ['vendor/jszip.min.js'];
+$PDFJS_ESM_CDNS = ['vendor/pdf.min.mjs'];
 ```
+
+> pdf.js 的 `cmaps/` 目录**必须一起下载**，否则中文 PDF 会静默抽不出字
+> （见 [PDF 阅读（原版式）](#pdf-阅读原版式) 的"两个必须知道的坑"）。
 
 ### 其他可加的功能
 
 - **PWA**：加 `manifest.json` + Service Worker，可安装到桌面、完全离线
-- **PDF 导入**：接 `pdf.js`，或做 PDF → 仿生 HTML 的转换工具
+- **PDF 书签目录**：读 `doc.getOutline()` 做侧栏目录 + 跳转，
+  有书签的 PDF 体验会好很多（`getOutline` 已在探针里验证可用）
+- **PDF 文本搜索**：现在只能靠高亮看，加个搜索框能直接定位（`TextLayer` 已有文本）
+- **PDF 双指缩放 / 框选缩放**：目前只有按钮和 `+`/`-`
+- **PDF 保留原版式模式**：按坐标绝对定位还原原始排版（工作量大，收益有限）
 - **按书保存参数**：不同书/不同语言用不同预设
 - **生词本**：长按查词并记录
 - **朗读**：接 `SpeechSynthesis`，边听边高亮（对 ADHD 可能很有价值）

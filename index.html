@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Bionic Reader · 仿生阅读器</title>
-<meta name="description" content="导入 EPUB / TXT，用仿生阅读（Bionic Reading）方式排版，支持分章懒渲染与进度记忆。">
+<meta name="description" content="导入 EPUB / TXT / PDF，用仿生阅读（Bionic Reading）方式排版，支持分章懒渲染与进度记忆。">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
 <style>
 /* ============================================================
@@ -270,6 +270,135 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 #scroller{
   height:100%;overflow-y:auto;overflow-x:hidden;
   scroll-behavior:auto;scrollbar-width:thin;
+}
+
+/* ============================================================
+   PDF 原版阅读器
+   ------------------------------------------------------------
+   与重排阅读（#reader）**互斥**：同一时刻只显示一个。
+   打开 PDF 时给 body 加 .pdf-mode，用 CSS 切显示。
+
+   为什么是"原版式"而不是"重排"：
+     PDF 是页面描述格式，重排会丢掉表格/公式/图注/分栏等版面信息，
+     而且扫描件根本没有文字层可重排。原版式则：
+       · 扫描件**不需要 OCR** 就能直接读（看的就是原图）
+       · 排版 100% 还原
+       · 有文字层的还能选中/复制
+
+   为什么必须做"可视区渲染"：
+     一本 325 页的书，每页一张 canvas（约 1200x1700）≈ 8MB 位图，
+     全渲染就是 2.6GB —— 必然崩。所以只渲染可视区附近的页，
+     离得远的页销毁 canvas 只留占位高度，滚动位置不会跳。
+   ============================================================ */
+
+/* PDF 模式下的显隐切换。
+   ★ 选择器都带 body.pdf-mode 前缀，且刻意不写单独的 `#pager{...}` 形式 ——
+     那样会在样式表里**先于**真正的 `#pager{...}` 规则出现，
+     把按"第一个匹配"取规则的检查（tests/test-home-glass.mjs 用非贪婪正则）
+     引到错误的地方。保持"每个选择器只定义一次"更省心。 */
+body.pdf-mode #reader{display:none}
+body.pdf-mode #pager{display:none}
+body:not(.pdf-mode) #pdfBar{display:none}
+body.pdf-mode #scroller{background:var(--pdf-backdrop,#63676e)}
+
+/* PDF 模式下，设置面板里"对 PDF 无效"的两节收起来。
+   ------------------------------------------------------------
+   ★ 注意：只是**隐藏这两节**，面板本身必须能打开！
+     PDF 高亮的颜色/不透明度就在同一个面板里（"PDF 高亮"一节）。
+     早期把整个 #btnPanel 禁用了，等于把用户锁在门外 ——
+     想调高亮颜色却点不进设置。
+   用 display:none 而不是从 DOM 里删，切回 EPUB/TXT 要原样回来。 */
+body.pdf-mode #bionicSec,
+body.pdf-mode #typesetSec{display:none}
+
+/* 反过来：非 PDF 时"PDF 高亮"一节没有意义（那些设置只作用于 PDF 色带）。
+   但它无害，留着也方便用户提前配好颜色 —— 所以**不隐藏**，
+   只在标题旁加一句说明。 */
+
+#pdfBar{
+  position:absolute;left:0;right:0;top:0;z-index:22;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:6px 12px;
+  background:var(--glass-bg-strong);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border-bottom:1px solid var(--glass-border);
+  font-size:12.5px;color:var(--text-dim);
+}
+#pdfBar .pdf-sep{width:1px;height:18px;background:var(--border);margin:0 2px}
+#pdfBar label{display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none}
+#pdfBar #pdfZoomLabel{min-width:44px;text-align:center;font-variant-numeric:tabular-nums}
+#pdfBar #pdfPageBox{display:flex;align-items:center;gap:4px}
+#pdfBar #pdfPageInput{
+  width:52px;padding:3px 6px;text-align:center;
+  border:1px solid var(--border);border-radius:6px;
+  background:var(--bg-elev);color:var(--text);font:inherit;
+}
+#pdfBar .pg-btn{padding:4px 9px}
+#pdfBar .pg-btn[disabled]{opacity:.4;cursor:default}
+
+/* 页面容器：垂直排列、居中，像 SumatraPDF 的连续滚动 */
+#pdfPages{
+  display:flex;flex-direction:column;align-items:center;
+  gap:14px;padding:52px 12px 60px;
+}
+/* 每页一个占位盒。canvas 与文字层都绝对定位在里面，
+   这样销毁 canvas 时布局高度不变，滚动不会跳。 */
+.pdf-page{
+  position:relative;background:#fff;
+  box-shadow:0 2px 10px rgba(0,0,0,.28);
+  flex:0 0 auto;
+}
+.pdf-page canvas{display:block;width:100%;height:100%}
+
+/* pdf.js 的文字层：铺在 canvas 之上。
+   默认**完全透明**（只用于选中/复制）。 */
+.pdf-tl{
+  position:absolute;inset:0;overflow:hidden;
+  line-height:1;text-align:initial;
+  /* pdf.js 用 --scale-factor 把字号从 PDF 单位换算到 CSS 像素 */
+}
+.pdf-tl span{
+  position:absolute;white-space:pre;transform-origin:0 0;
+  color:transparent;cursor:text;
+}
+/* ★ 仿生式锚点高亮：只给**少数几个字**上色带，而不是整行。
+   ------------------------------------------------------------
+   在 PDF 上做不到"把词首字母加粗/变大" —— 页面文字已经栅格化进
+   canvas 的像素里了，那是渲染层面的硬限制。
+   但可以做到**等价效果**：把一个文字块拆成单字 span，
+   只给锚点那几个字加底色，视觉引导作用与仿生阅读一致。
+
+   .pdf-blk    = 承载一行文字的容器（保留 pdf.js 的定位，自身不上色）
+   .pdf-ch     = 单个字（每个字自己定位，便于单独上色）
+   .pdf-anchor = 被选中的锚点字
+   .pdf-plain  = 其余的字（保持透明，只用于选中/复制）
+
+   ★ 注意：被拆解过的原 span 会打上 data-split="1" 并设为 visibility:hidden，
+     这里必须排除它 —— 否则旧规则会给它画出一块**多余的色带**
+     （表现为行尾/右侧的孤立黄块）。
+
+   ★ 颜色与不透明度都由 CSS 变量控制（--pdf-hl-rgb / --pdf-hl-alpha），
+     由设置面板写入。所以这里不写死颜色。 */
+body.pdf-hl .pdf-tl span.pdf-anchor{
+  background:rgba(var(--pdf-hl-rgb, 255,214,0), var(--pdf-hl-alpha, .22));
+  border-radius:2px;
+}
+/* 兼容"整块高亮"档（未拆字的旧行为）：只对带 .pdf-blk 的容器上色，
+   且排除已经拆过字的原 span，避免重复上色。
+   整块覆盖面积大，透明度要再低一档，否则会糊住原图文字。 */
+body.pdf-hl.block-hl .pdf-tl span.pdf-blk{
+  background:rgba(var(--pdf-hl-rgb, 255,214,0),
+                  calc(var(--pdf-hl-alpha, .22) * .75));
+  border-radius:2px;
+}
+.pdf-tl span::selection{background:rgba(31,95,180,.35)}
+
+/* 还没渲染出来的页显示一个浅灰占位，避免大片空白 */
+.pdf-page .pdf-skel{
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  color:#b9bcc2;font-size:12px;background:#fff;
 }
 
 /* --- 底部章节条 ---
@@ -876,8 +1005,34 @@ html[data-theme="dark"] .btn.ghost:hover{
 
     <!-- 阅读区 -->
     <section id="stage">
-      <div id="scroller"><article id="reader"></article></div>
+      <div id="scroller">
+        <article id="reader"></article>
+        <!-- PDF 原版阅读器的页面容器（与 #reader 互斥显示，见 CSS 的 .pdf-mode） -->
+        <div id="pdfPages"></div>
+      </div>
       <div id="progress"></div>
+
+      <!-- PDF 工具栏（只在打开 PDF 时显示）。
+           定位：像 SumatraPDF 那样"看原版式"，保留排版、表格、公式、图注。
+           与重排阅读（#reader）互斥：同一时刻只有一个可见。 -->
+      <div id="pdfBar" class="hidden">
+        <button class="pg-btn" id="pdfZoomOut" title="缩小 (-)"><span>−</span></button>
+        <span id="pdfZoomLabel">100%</span>
+        <button class="pg-btn" id="pdfZoomIn" title="放大 (+)"><span>+</span></button>
+        <button class="pg-btn" id="pdfFitWidth" title="适应宽度">适应宽度</button>
+        <button class="pg-btn" id="pdfFitPage" title="适应整页">整页</button>
+        <span class="pdf-sep"></span>
+        <label id="pdfHlToggle" title="把识别出的文字块加色带高亮">
+          <input type="checkbox" id="pdfHighlight"> 文字高亮<em id="pdfHlState"></em>
+        </label>
+        <span class="pdf-sep"></span>
+        <button class="pg-btn" id="pdfPrevPage" title="上一页 (↑ / PgUp)">↑</button>
+        <span id="pdfPageBox">
+          <input id="pdfPageInput" type="text" inputmode="numeric" value="1">
+          <span id="pdfPageTotal">/ 1</span>
+        </span>
+        <button class="pg-btn" id="pdfNextPage" title="下一页 (↓ / PgDn / 空格)">↓</button>
+      </div>
 
       <!-- 底部章节条（打开书后才显示）
            只有"上一章 / 下一章"两个动作 —— 章内滚动交给滚轮/滚动条，
@@ -901,7 +1056,7 @@ html[data-theme="dark"] .btn.ghost:hover{
         <div class="drop-card" id="dropCard">
           <div class="big">📖</div>
           <h1>导入一本书，开始仿生阅读</h1>
-          <p>把 <b>EPUB</b> 或 <b>TXT</b> 文件拖到这里，或者点击下面的按钮选择。<br>全部在本机解析，不会上传到任何服务器。</p>
+          <p>把 <b>EPUB</b>、<b>TXT</b> 或 <b>PDF</b> 文件拖到这里，或者点击下面的按钮选择。<br>全部在本机解析，不会上传到任何服务器。</p>
           <div class="btn-row">
             <button class="btn" id="btnPick">选择文件</button>
             <button class="btn ghost" id="btnDemo">看示例文本</button>
@@ -910,7 +1065,8 @@ html[data-theme="dark"] .btn.ghost:hover{
           <div class="fmt-list">
             <div><b>EPUB</b>按章节解析<br>支持目录与封面</div>
             <div><b>TXT</b>自动识别 GBK<br>按章节标题切分</div>
-            <div><b>隐私</b>纯本地处理<br>无网络请求</div>
+            <div><b>PDF</b>原版式阅读<br>扫描件直接能看</div>
+            <div><b>隐私</b>纯本地处理<br>文件不上传</div>
           </div>
         </div>
       </div>
@@ -924,7 +1080,10 @@ html[data-theme="dark"] .btn.ghost:hover{
 
     <!-- 设置面板 -->
     <aside id="panel" class="hidden">
-      <div class="panel-sec">
+      <!-- PDF 模式下隐藏这一节：文字已栅格化，加粗/变色都做不到，
+           留着这些滑块只会让人以为能动。CSS 用 body.pdf-mode 控制，
+           不用 JS 删节点 —— 切回 EPUB/TXT 时要原样出现。 -->
+      <div class="panel-sec" id="bionicSec">
         <h3>仿生阅读</h3>
         <div class="field">
           <label>首字母高亮方式</label>
@@ -959,7 +1118,8 @@ html[data-theme="dark"] .btn.ghost:hover{
         </div>
       </div>
 
-      <div class="panel-sec">
+      <!-- 正文排版同样只对重排阅读生效，PDF 模式下隐藏 -->
+      <div class="panel-sec" id="typesetSec">
         <h3>排版</h3>
         <div class="field">
           <label>正文字号 <b id="vSize">19px</b></label>
@@ -1013,6 +1173,30 @@ html[data-theme="dark"] .btn.ghost:hover{
         </div>
       </div>
 
+      <div class="panel-sec" id="pdfHlSec">
+        <h3>PDF 高亮</h3>
+        <div class="field">
+          <label>高亮色</label>
+          <div class="swatches" id="hlSwatches"></div>
+          <label class="picker-row">
+            <span>自定义颜色</span>
+            <input type="color" id="hlPicker" value="#ffd600">
+          </label>
+          <div class="hint">
+            PDF 的文字已经栅格化进页面图片，<b>无法加粗</b>，只能用底色突出。
+            选浅色系，太深会盖住原文。
+          </div>
+        </div>
+        <div class="field">
+          <label>不透明度 <b id="vHlAlpha">22%</b></label>
+          <input type="range" id="rHlAlpha" min="8" max="60" step="2" value="22">
+          <div class="hint">
+            底色压在原图之上，<b>调高会妨碍阅读</b>。默认 22% 只做轻微提示；
+            觉得看不清锚点再往上调。改完在 PDF 里勾选「文字高亮」即可看到。
+          </div>
+        </div>
+      </div>
+
       <div class="panel-sec">
         <h3>操作</h3>
         <div class="seg" style="margin-bottom:9px">
@@ -1038,7 +1222,7 @@ html[data-theme="dark"] .btn.ghost:hover{
 <!-- 全屏拖放提示 -->
 <div id="dropOverlay"><span>松手即导入 📥</span></div>
 <div id="toast"></div>
-<input type="file" id="fileInput" accept=".epub,.txt,text/plain,application/epub+zip" hidden>
+<input type="file" id="fileInput" accept=".epub,.txt,.pdf,text/plain,application/epub+zip,application/pdf" hidden>
 
 <!-- JSZip：仅用于解析 EPUB，延迟加载 -->
 <script>
@@ -1578,13 +1762,21 @@ function normalizeText(s) {
 }
 
 /* 把长文本转成段落数组 */
+/* 把长文本转成段落数组。
+   '## ' 前缀是**显式标题标记**（导出/其它来源可能带着它）。 */
 function toParagraphs(body) {
   const raw = normalizeText(body).split('\n');
   const out = [];
   for (let line of raw) {
     line = line.trim();
     if (!line) continue;
-    // 短行且无句末标点 → 视为标题
+    // 显式标题标记：'## ' 前缀 → h3
+    if (line.startsWith('## ')) {
+      const t = line.slice(3).trim();
+      if (t) out.push({ type: 'h3', text: t });
+      continue;
+    }
+    // 短行且无句末标点 → 视为标题（章节 body 的开头常有短标题行）
     if (line.length <= 40 && !/[。！？.!?…"」』】]$/.test(line) &&
         !/^[「『"'(（]/.test(line) && out.length < 3) {
       out.push({ type: 'h3', text: line });
@@ -2061,6 +2253,776 @@ async function parseEPUB(buf, onProgress) {
 }
 
 /* ============================================================
+   3b. PDF 原版阅读器
+
+   定位：像 SumatraPDF 那样**按原版式看 PDF**，不重排。
+   与重排阅读（#reader）互斥，通过 body.pdf-mode 切换。
+
+   为什么改成"不重排"：
+     1. PDF 是*页面描述*格式，重排必然丢掉表格/公式/图注/分栏；
+     2. 扫描件根本没有文字层，重排无从谈起（之前必须先跑 30 分钟 OCR）；
+     3. 原版式下扫描件**开箱即读**，因为看的就是原图。
+
+   高亮怎么做（重要）：
+     PDF 页面渲染到 canvas 后，文字已经**栅格化进像素**了，
+     所以"把词首字母加粗"这类仿生阅读在 PDF 上**做不到** ——
+     这是渲染层面的硬限制，不是实现问题。
+     能做的是**整块高亮**：pdf.js 的 TextLayer 会在 canvas 之上
+     生成一层与原文位置对齐的透明 <span>，给它们加底色即可。
+       · 有文字层的 PDF → 能高亮
+       · 纯扫描件       → 抽不到文字，高亮开关置灰并说明原因
+
+   性能：必须做"可视区渲染"。
+     325 页 × 每页约 8MB 位图 ≈ 2.6GB，全渲染必崩。
+     所以只为可视区附近的页建 canvas，离远了就销毁（保留占位高度）。
+   ============================================================ */
+
+const PDFJS_VERSION = '4.10.38';
+/* ★ 回退列表里**只能放 ESM（.mjs）**：import() 不能执行 UMD 构建，
+   会以 "Failed to fetch dynamically imported module" 失败。
+   它常排在最后，看起来像"所有 CDN 都挂了"，实际是格式不对。
+   真要回退 UMD 得用 <script src> 注入，见 _loadPDFJSViaScript。 */
+const PDFJS_ESM_CDNS = [
+  `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.mjs`,
+  `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.mjs`,
+  `https://esm.sh/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.mjs`,
+];
+const PDFJS_UMD_CDNS = [
+  `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.js`,
+  `https://unpkg.com/pdfjs-dist@${PDFJS_VERSION}/build/pdf.min.js`,
+];
+
+let pdfjsPromise = null;
+let pdfjsVersion = PDFJS_VERSION;
+
+function _finishPDFJS(lib) {
+  const v = lib.version || PDFJS_VERSION;
+  pdfjsVersion = v;
+  try {
+    // worker 必须与主库同版本，pdf.js 会校验
+    lib.GlobalWorkerOptions.workerSrc =
+      `https://cdn.jsdelivr.net/npm/pdfjs-dist@${v}/build/pdf.worker.min.mjs`;
+  } catch (_) { /* ESM 命名空间可能冻结，忽略 */ }
+  return lib;
+}
+
+function _loadPDFJSViaScript() {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const next = () => {
+      if (i >= PDFJS_UMD_CDNS.length) return reject(new Error('UMD 兜底也失败'));
+      const s = document.createElement('script');
+      s.src = PDFJS_UMD_CDNS[i++];
+      s.onload = () => {
+        const lib = window.pdfjsLib;
+        if (lib && lib.getDocument) resolve(lib); else next();
+      };
+      s.onerror = next;
+      document.head.appendChild(s);
+    };
+    next();
+  });
+}
+
+function loadPDFJS() {
+  if (pdfjsPromise) return pdfjsPromise;
+  pdfjsPromise = (async () => {
+    const errors = [];
+    for (const url of PDFJS_ESM_CDNS) {
+      try {
+        const mod = await import(/* webpackIgnore: true */ url);
+        // ★ ESM 命名空间是冻结的，不能给它挂 __version
+        const lib = mod.default && mod.default.getDocument ? mod.default : mod;
+        if (!lib || !lib.getDocument) throw new Error('模块里没有 getDocument');
+        return _finishPDFJS(lib);
+      } catch (e) {
+        errors.push(`${url} → ${e.message}`);
+      }
+    }
+    try {
+      return _finishPDFJS(await _loadPDFJSViaScript());
+    } catch (e) {
+      errors.push(`UMD → ${e.message}`);
+    }
+    throw new Error('pdf.js 加载失败（需联网）：' + errors.join(' | '));
+  })();
+  return pdfjsPromise;
+}
+
+/* ---------------- 视图器状态 ---------------- */
+const pdfView = {
+  doc: null,
+  docId: '',             // 用于存阅读进度
+  numPages: 0,
+  scale: 1,
+  fitMode: 'width',      // width | page | none
+  baseViewport: null,    // scale=1 时的视口，用于算适配缩放
+  pageEls: [],           // 每页的容器（常驻，保证滚动高度稳定）
+  rendered: new Map(),   // pageNumber -> {canvas, tlDiv, task}
+  current: 1,            // 可视区第一页（用于工具栏页码显示）
+  observer: null,        // IntersectionObserver：决定渲染/销毁
+  scrollTimer: null,
+  highlight: false,
+  token: 0,              // 切换文档/缩放时作废旧任务
+  looksScanned: false,   // 打开时的抽样估算（仅供参考，会漏）
+  anyText: false,
+  textSeenPages: 0,      // 实际渲染过的页里，有文字块的页数
+  renderedPages: 0,      // 实际渲染过的页数
+};
+
+/* 计算"适应宽度"的缩放：容器宽 - 左右留白 */
+function _pdfFitScale(pt) {
+  const box = $('#scroller');
+  const avail = (box ? box.clientWidth : 900) - 40;
+  return Math.max(0.2, avail / pt.width);
+}
+
+/* 按当前 fitMode 求缩放 */
+function _pdfComputeScale() {
+  const vp = pdfView.baseViewport;
+  if (!vp) return 1;
+  if (pdfView.fitMode === 'width') return _pdfFitScale(vp);
+  if (pdfView.fitMode === 'page') {
+    const box = $('#scroller');
+    const availH = (box ? box.clientHeight : 800) - 130;
+    return Math.max(0.2, Math.min(_pdfFitScale(vp), availH / vp.height));
+  }
+  return pdfView.scale;
+}
+
+/* 建占位盒：只算尺寸，不渲染像素。
+   先给全书建盒，滚动条长度才是对的，页码跳转才有目标。 */
+async function _pdfBuildPlaceholders() {
+  const host = $('#pdfPages');
+  host.replaceChildren();
+  pdfView.pageEls = [];
+  const vp = pdfView.baseViewport;
+  const scale = _pdfComputeScale();
+  pdfView.scale = scale;
+
+  const frag = document.createDocumentFragment();
+  for (let n = 1; n <= pdfView.numPages; n++) {
+    const el = document.createElement('div');
+    el.className = 'pdf-page';
+    el.dataset.page = String(n);
+    // 各页尺寸可能不同（横竖混排），所以逐页取真实视口
+    let w = vp.width, h = vp.height;
+    if (pdfView.pageSizes[n]) { w = pdfView.pageSizes[n].w; h = pdfView.pageSizes[n].h; }
+    el.style.width = Math.round(w * scale) + 'px';
+    el.style.height = Math.round(h * scale) + 'px';
+    const skel = document.createElement('div');
+    skel.className = 'pdf-skel';
+    skel.textContent = '第 ' + n + ' 页';
+    el.appendChild(skel);
+    pdfView.pageEls.push(el);
+    frag.appendChild(el);
+  }
+  host.appendChild(frag);
+}
+
+/* 渲染单页：canvas + 文字层 */
+async function _pdfRenderPage(n, token) {
+  const el = pdfView.pageEls[n - 1];
+  if (!el || pdfView.rendered.has(n)) return;
+  if (token !== pdfView.token) return;
+
+  const page = await pdfView.doc.getPage(n);
+  if (token !== pdfView.token) return;
+
+  const vp = page.getViewport({ scale: pdfView.scale });
+
+  // 占位盒尺寸按真实视口校正（首轮是用第 1 页尺寸估的）
+  el.style.width = Math.round(vp.width) + 'px';
+  el.style.height = Math.round(vp.height) + 'px';
+
+  const canvas = document.createElement('canvas');
+  // devicePixelRatio：高分屏要按物理像素渲染，否则发虚
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(vp.width * dpr);
+  canvas.height = Math.floor(vp.height * dpr);
+  canvas.style.width = Math.round(vp.width) + 'px';
+  canvas.style.height = Math.round(vp.height) + 'px';
+
+  const skel = el.querySelector('.pdf-skel');
+  if (skel) skel.remove();
+
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const task = page.render({
+    canvasContext: ctx,
+    viewport: vp,
+    transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+  });
+
+  // 文字层：先建 div，再交给 TextLayer 填 span
+  const tlDiv = document.createElement('div');
+  tlDiv.className = 'pdf-tl';
+  tlDiv.style.setProperty('--scale-factor', String(pdfView.scale));
+
+  el.appendChild(canvas);
+  el.appendChild(tlDiv);
+
+  pdfView.rendered.set(n, { canvas, tlDiv, task });
+
+  try {
+    await task.promise;
+  } catch (e) {
+    // 取消（切换缩放/销毁）不算错误
+    if (e && e.name !== 'RenderingCancelledException') console.warn('第 ' + n + ' 页渲染失败', e);
+    return;
+  }
+  if (token !== pdfView.token) return;
+
+  // 文字层可有可无：扫描件抽不到文字，TextLayer 会产出 0 个 span
+  try {
+    const tc = await page.getTextContent();
+    if (token !== pdfView.token) return;
+    const layer = new (await loadPDFJS()).TextLayer({
+      textContentSource: tc,
+      container: tlDiv,
+      viewport: vp,
+    });
+    await layer.render();
+    let blocks = 0;
+    for (const d of (layer.textDivs || [])) {
+      // ★ 空 div（宽度 0 的分隔块）必须藏掉：
+      //   给它们加底色会在页面上画出莫名其妙的色点
+      if (!(d.textContent || '').trim()) { d.style.display = 'none'; continue; }
+      blocks++;
+    }
+    /* 拆成单字，为"只高亮几个字"做准备。
+       必须在 TextLayer.render() 之后做 —— 那时 pdf.js 已经把
+       位置/字号/transform 写进 style，我们只要沿 x 轴切分即可。 */
+    _pdfSplitBlocksIntoChars(tlDiv, layer.textDivs || []);
+
+    el.dataset.hasText = blocks ? '1' : '0';
+    el.dataset.blocks = String(blocks);
+    /* 逐页实时统计：这是**唯一可靠**的"这本书有没有文字"的依据。
+       打开时的抽样只是估算，会漏（实测一本只有 4 页有文字的书，
+       抽样全部落空，导致提示说"多半是扫描件" —— 明明不是）。
+       所以每渲染一页就记一笔，统计值只增不减。 */
+    if (blocks > 0) pdfView.textSeenPages++;
+    pdfView.renderedPages++;
+    _pdfUpdateHlHint();
+  } catch (e) {
+    el.dataset.hasText = '0';
+    el.dataset.blocks = '0';
+    pdfView.renderedPages++;
+    _pdfUpdateHlHint();
+  }
+}
+
+/* ============================================================
+   PDF 锚点高亮：把文字块拆成单字，只给少数几个字上色带
+
+   为什么这样做：
+     用户要的是"像仿生阅读那样，只突出几个字"，而不是整行糊一片底色。
+     在 PDF 上**加粗词首做不到**（文字已栅格化进 canvas 像素里），
+     但"只给几个字加底色"是等价且可行的 —— 视觉引导作用一致。
+
+   怎么切：
+     pdf.js 的 TextLayer 给每个文字块一个绝对定位的 span，
+     style 里带 left(百分比) / fontSize / transform:scaleX(…)。
+     块内文字是**单个文本节点**，没有字符级位置信息。
+     所以按字符数**等宽均分**这个 span 的宽度：
+       · 中文/日文等全角字符 → 1 个宽度单位
+       · 拉丁字母/数字/半角标点 → 0.5 个单位
+     然后把每个字符做成绝对定位的子 span，left 累加。
+
+     ★ 为什么用等宽均分而不是精确测量：
+       浏览器里量每个字的真实宽度需要逐个 offsetWidth（会强制重排，
+       一页几十个块 × 每块几十字 = 上千次重排，卡到不能用）。
+       而 TextLayer 的 span 本身已经带 scaleX 把整块的宽度校准到与
+       原图对齐了，所以"按视觉宽度比例均分"的误差很小
+       （中文本来就等宽，西文误差也在半个字以内），
+       而且**色带本来就是近似标记**，不需要像素级精确。
+   ============================================================ */
+
+/* 估算一个字符占几个"宽度单位"。全角 1.0，半角 0.5，制表/空格按半角算。 */
+function _pdfCharWidth(ch) {
+  const c = ch.codePointAt(0);
+  // CJK 统一表意文字、全角标点、假名、韩文 → 全角
+  if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) ||
+      (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x20000 && c <= 0x3fffd)) {
+    return 1;
+  }
+  return 0.5;
+}
+
+/* 把一批文字块拆成单字 span。
+   参数 tlDiv 是文字层容器，divs 是 TextLayer 产出的 textDiv 列表。 */
+function _pdfSplitBlocksIntoChars(tlDiv, divs) {
+  const strength = state.prefs.strength || 3;
+  const created = [];
+
+  for (const d of divs) {
+    const text = d.textContent || '';
+    if (!text.trim()) continue;              // 空块已在上面隐藏
+    // 已经拆过就别重复拆（缩放重建时会重新生成，但仍防一手）
+    if (d.dataset.split === '1') continue;
+
+    // 记下 pdf.js 给的定位信息，作为切分的基准
+    const left = d.style.left;               // 百分比，如 "15.12%"
+    const top = d.style.top;
+    const fontSize = d.style.fontSize;       // calc(var(--scale-factor)*15.87px)
+    const transform = d.style.transform;     // scaleX(1.00013)
+    if (!left || !top) continue;
+
+    // 块内按视觉宽度均分：先算总宽度单位
+    const chars = [...text];
+    let total = 0;
+    for (const ch of chars) total += _pdfCharWidth(ch);
+    if (!(total > 0)) continue;
+
+    /* 锚点集合：直接复用仿生阅读的算法（分词 + 虚词表 + 间隔表），
+       所以 PDF 上的锚点行为与 EPUB/TXT **一致**。
+       computeHanAnchors 返回 Map<起始下标, 长度>。
+
+       ★ 注意 PDF 的特殊性：这里的"块"是 pdf.js 按**基线行**切的，
+         常常是句子中间的片段（"许多潜在的指称对象。有的语言说Ihit"），
+         不以标点开头。而算法的第一遍"结构锚点"只在标点后/段首触发 ——
+         所以片段开头的字拿不到锚点，整块可能一个锚点都没有
+         （实测出现过整行空白）。
+       补救：**块首补一个锚点**，视觉上等价于"每行有个落点"，
+         这正是仿生阅读想要的引导效果，也让每行的锚点密度均匀。 */
+    let anchors;
+    try {
+      anchors = computeHanAnchors(text, strength);
+    } catch (_) {
+      anchors = new Map();      // 分词器不可用时退化为"不高亮"
+    }
+
+    /* ★ 英文（拉丁）词的锚点：每个词的前 1~2 个字母。
+       ------------------------------------------------------------
+       computeHanAnchors 只处理**汉字**（那套规则基于"中文没有空格、
+       靠标点和虚词透出词边界"）。拉丁词走过去**一个锚点都拿不到** ——
+       实测纯英文 PDF 每行只有"块首补位"那一个孤零零的锚点，
+       像 internationalization 这种长词也完全不标。
+
+       这里补上拉丁词的规则：**按词取前缀**，长度由强度决定：
+         · 强度 1~2 → 1 个字母（最克制，接近"只给个起点"）
+         · 强度 3~5 → 2 个字母（默认档，锚定感明显又不碎）
+       与中文那套的差别：中文锚"整词的实词部分"，英文锚"词首固定几个字母" ——
+       这正是仿生阅读对拉丁字母的标准做法（词首加粗，其余淡化）。
+
+       上限保护：词长 <= 2 时最多取 1 个（否则整个词都被标，失去对比）。 */
+    {
+      const enLen = strength >= 3 ? 2 : 1;
+      WORD_RE.lastIndex = 0;
+      let m;
+      while ((m = WORD_RE.exec(text)) !== null) {
+        const w = m[0];
+        if (HAN_RE.test(w)) continue;              // 汉字交给上面那套
+        if (!/[A-Za-z]/.test(w)) continue;          // 纯数字不锚（如 2026）
+        const n = w.length <= 2 ? 1 : Math.min(enLen, w.length - 1);
+        const start = m.index;
+        // 已有锚点（多半是块首补位）就不覆盖，避免重复
+        if (!anchors.has(start)) anchors.set(start, n);
+      }
+    }
+
+    // 块首补位（跳过空白/标点开头）
+    {
+      let i = 0;
+      while (i < chars.length && /[\s，。！？；：、）」』"']/.test(chars[i])) i++;
+      if (i < chars.length && !anchors.has(i)) anchors.set(i, 1);
+    }
+    /* 块尾去位：锚点落在**最后一个字**上时，色带会贴着行右缘，
+       看起来像一块悬空的色斑（实测出现）。
+       行尾本来也不是视线落点，去掉更干净。 */
+    if (anchors.has(chars.length - 1)) anchors.delete(chars.length - 1);
+
+    // 把 [start, start+len) 展开成"下标 → 是否是锚点"
+    const isAnchor = new Array(chars.length).fill(false);
+    for (const [start, len] of anchors) {
+      for (let k = start; k < start + len && k < chars.length; k++) isAnchor[k] = true;
+    }
+
+    /* 拆字：以**原 span 自身的几何**为唯一基准。
+       ------------------------------------------------------------
+       ★ 之前踩的坑：把原 span 包进一个"继承同样定位信息"的容器，
+         再在容器里按百分比切分 —— 结果是定位信息叠加两次
+         （容器一次、原 span 一次），短块被拉伸，色带漂到行尾外面
+         （实测最大漂移 353px）。
+
+       正确做法：**整平结构**。
+         · 量出原 span 的实际位置与尺寸（一次 getBoundingClientRect）
+         · 在它的父节点上、用同样的坐标放一个字容器
+         · 每个字按"像素"定位（accumulated px），不用百分比
+       这样只有一层定位，误差只来自"等宽估算"，不再有叠加。 */
+    const r0 = d.getBoundingClientRect();
+    const parentRect = d.parentNode.getBoundingClientRect();
+    // 转成相对父容器的坐标
+    const px = r0.left - parentRect.left;
+    const py = r0.top - parentRect.top;
+    if (!(r0.width > 0)) continue;
+
+    const box = document.createElement('span');
+    box.className = 'pdf-blk';
+    box.style.cssText = `position:absolute;left:${px.toFixed(1)}px;top:${py.toFixed(1)}px;` +
+                        `width:${r0.width.toFixed(1)}px;height:${r0.height.toFixed(1)}px;` +
+                        `font-size:${fontSize};white-space:pre;pointer-events:none`;
+    d.parentNode.insertBefore(box, d);
+
+    // 原 span 隐藏但**保留在 DOM 里**：选中/复制仍然可用
+    d.style.visibility = 'hidden';
+    d.style.background = 'none';
+    d.dataset.split = '1';
+    box.appendChild(d);
+
+    /* 逐字建 span。位置用像素累加：
+       总宽度 = 原 span 的宽度；每个字分到的宽度按"宽度单位"比例摊。
+       中文等宽，所以中文行的误差几乎为 0；西文行会有半个字以内的偏差，
+       对"色带标记"来说完全够用。 */
+    const totalW = r0.width;
+    let acc = 0;
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < chars.length; i++) {
+      const w = _pdfCharWidth(chars[i]);
+      const x = (acc / total) * totalW;      // 像素
+      acc += w;
+      const s = document.createElement('span');
+      s.className = isAnchor[i] ? 'pdf-ch pdf-anchor' : 'pdf-ch pdf-plain';
+      s.textContent = chars[i];
+      /* 每个字用一个**固定宽度**的盒子承载（宽度 = 它分到的像素），
+         并 left 定位。这样色带正好覆盖这个字，
+         而盒子里的文字透明、只做选中/复制用。 */
+      const cw = (w / total) * totalW;
+      s.style.cssText = `position:absolute;left:${x.toFixed(1)}px;top:0;` +
+                        `width:${cw.toFixed(1)}px;height:100%;` +
+                        `white-space:pre;color:transparent;overflow:hidden;` +
+                        `display:flex;align-items:flex-end`;
+      frag.appendChild(s);
+      created.push(s);
+    }
+    box.appendChild(frag);
+  }
+
+  return created;
+}
+
+/* 根据**实际渲染过**的页，如实更新高亮提示。
+   不猜、不吓唬人：只在"确实翻了若干页且一页文字都没有"时才说是扫描件。 */
+function _pdfUpdateHlHint() {  const el = $('#pdfHlToggle');
+  if (!el) return;
+  const badge = $('#pdfHlState');
+  const seen = pdfView.renderedPages || 0;
+  const withText = pdfView.textSeenPages || 0;
+
+  if (withText > 0) {
+    el.title = `已在这本书里找到 ${withText} 页含文字，文字块会加色带高亮。`
+             + `（扫描页没有文字层，不会有变化）`;
+    if (badge) { badge.textContent = ''; badge.hidden = true; }
+    return;
+  }
+
+  if (seen >= 3) {
+    /* 已经翻了 3 页以上、一个文字块都没有 → 基本可以确定是纯扫描件。
+       这时要**明确告诉用户**，并且给出可操作的下一步 ——
+       否则用户只会看到"勾了但是没反应"，以为坏了。 */
+    el.title = `已查看的 ${seen} 页都没有文字层 —— 这本书是纯扫描件，`
+             + `没有可定位的文字块，所以开了高亮也不会变色。`
+             + `想让扫描件也能高亮：用 bionic-reader/ocr/ 里的脚本补一层文字层。`;
+    if (badge) {
+      badge.textContent = '（本页无文字层）';
+      badge.hidden = false;
+      badge.style.color = 'var(--text-faint)';
+      badge.style.fontStyle = 'normal';
+      badge.style.fontSize = '11px';
+    }
+    return;
+  }
+
+  el.title = '把识别出的文字块加色带高亮（扫描页没有文字层，不会有变化）';
+  if (badge) { badge.textContent = ''; badge.hidden = true; }
+}
+
+/* 销毁单页的 canvas，释放显存 */
+function _pdfUnrenderPage(n) {
+  const el = pdfView.pageEls[n - 1];
+  const rec = pdfView.rendered.get(n);
+  if (!el || !rec) return;
+  try { rec.task && rec.task.cancel && rec.task.cancel(); } catch (_) {}
+  try { rec.canvas.remove(); } catch (_) {}
+  try { rec.tlDiv.remove(); } catch (_) {}
+  // 恢复占位，避免出现白洞
+  if (!el.querySelector('.pdf-skel')) {
+    const skel = document.createElement('div');
+    skel.className = 'pdf-skel';
+    skel.textContent = '第 ' + n + ' 页';
+    el.appendChild(skel);
+  }
+  pdfView.rendered.delete(n);
+}
+
+/* 可视区驱动：只渲染附近的页，远离的销毁。
+   用 IntersectionObserver 而不是 scroll 事件 —— 后者在快速滚动时
+   会疯狂触发，而且拿不到"哪些页真的进入了视口"。 */
+function _pdfSetupObserver() {
+  if (pdfView.observer) pdfView.observer.disconnect();
+  const io = new IntersectionObserver(entries => {
+    for (const en of entries) {
+      const n = Number(en.target.dataset.page);
+      if (!n) continue;
+      if (en.isIntersecting) {
+        // 进入视口（含 rootMargin 的缓冲带）→ 渲染
+        _pdfRenderPage(n, pdfView.token);
+        if (n < pdfView.current || pdfView.rendered.size === 0) pdfView.current = n;
+      } else {
+        // 离开缓冲带 → 销毁。留一点余量，避免小幅滚动反复重建。
+        _pdfUnrenderPage(n);
+      }
+    }
+    _pdfUpdateBar();
+  }, {
+    root: $('#scroller'),
+    // 上下各留一屏的缓冲，滚动时不会看到空白
+    rootMargin: '120% 0px 120% 0px',
+    threshold: 0,
+  });
+  pdfView.observer = io;
+  for (const el of pdfView.pageEls) io.observe(el);
+}
+
+/* 工具栏状态同步 */
+function _pdfUpdateBar() {
+  const sc = $('#scroller');
+  if (!sc || !pdfView.numPages) return;
+
+  // 当前页 = 视口顶部落在哪一页
+  const top = sc.scrollTop + 60;
+  let cur = 1;
+  for (let i = 0; i < pdfView.pageEls.length; i++) {
+    const el = pdfView.pageEls[i];
+    if (el.offsetTop <= top) cur = i + 1; else break;
+  }
+  pdfView.current = cur;
+
+  $('#pdfPageInput').value = String(cur);
+  $('#pdfPageTotal').textContent = '/ ' + pdfView.numPages;
+  $('#pdfZoomLabel').textContent = Math.round(pdfView.scale * 100) + '%';
+  $('#pdfPrevPage').disabled = cur <= 1;
+  $('#pdfNextPage').disabled = cur >= pdfView.numPages;
+
+  /* 高亮开关：**始终可用**。
+     理由：整本书有没有文字层无法在打开时可靠判定（抽样会漏），
+     而"开着高亮但没有文字块"的页面上什么都不会画，没有副作用。
+     所以不做禁用，提示文案交给 _pdfUpdateHlHint 按**实际渲染结果**更新。 */
+  const cb = $('#pdfHighlight');
+  cb.disabled = false;
+  $('#pdfHlToggle').style.opacity = '1';
+  _pdfUpdateHlHint();
+
+  // 顶栏进度条复用在 PDF 上
+  const max = sc.scrollHeight - sc.clientHeight;
+  const ratio = max > 4 ? sc.scrollTop / max : 0;
+  $('#progress').style.width = (ratio * 100).toFixed(1) + '%';
+}
+
+/* 跳到指定页 */
+function _pdfGotoPage(n, smooth = false) {
+  n = Math.max(1, Math.min(pdfView.numPages, Math.round(n) || 1));
+  const el = pdfView.pageEls[n - 1];
+  if (!el) return;
+  const sc = $('#scroller');
+  const target = Math.max(0, el.offsetTop - 56);   // 56 = 工具栏高度
+  sc.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
+  pdfView.current = n;
+  _pdfUpdateBar();
+}
+
+/* 按新的缩放重建整本（占位 + 重新渲染可视区） */
+async function _pdfRescale() {
+  const sc = $('#scroller');
+  const keepRatio = sc.scrollHeight > sc.clientHeight
+    ? sc.scrollTop / (sc.scrollHeight - sc.clientHeight) : 0;
+
+  pdfView.token++;
+  const token = pdfView.token;
+  for (const n of [...pdfView.rendered.keys()]) _pdfUnrenderPage(n);
+
+  await _pdfBuildPlaceholders();
+  _pdfSetupObserver();
+
+  requestAnimationFrame(() => {
+    const max = sc.scrollHeight - sc.clientHeight;
+    sc.scrollTop = keepRatio * max;
+    _pdfUpdateBar();
+  });
+}
+
+/* 打开 PDF：建立视图器 */
+async function openPDFViewer(buf, fileName) {
+  const lib = await loadPDFJS();
+  setLoading(true, '正在打开 PDF…');
+
+  const doc = await lib.getDocument({
+    data: new Uint8Array(buf),
+    // ★ 中文 PDF 的生死线：几乎都用 Type0 复合字体 + UniGB-* 编码，
+    //   pdf.js 不内置这些 CMap。不给 cMapUrl 的表现是**不报错、整页 0 字符**，
+    //   极易被误判成"这是扫描件"。实测带文字层的 PDF 不加时 325 页全 0 字符。
+    cMapUrl: `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsVersion}/cmaps/`,
+    cMapPacked: true,
+  }).promise;
+
+  pdfView.doc = doc;
+  pdfView.numPages = doc.numPages;
+  pdfView.rendered = new Map();
+  pdfView.token++;
+  pdfView.current = 1;
+  // 逐页统计要跟着换书清零，否则上一本的计数会串台
+  pdfView.textSeenPages = 0;
+  pdfView.renderedPages = 0;
+
+  // 探测第 1 页尺寸 + 是否存在文字层（决定高亮开关是否可用）
+  const p1 = await doc.getPage(1);
+  pdfView.baseViewport = p1.getViewport({ scale: 1 });
+  pdfView.pageSizes = { 1: { w: pdfView.baseViewport.width, h: pdfView.baseViewport.height } };
+
+  setLoading(true, '正在检测文字层…');
+  /* ★ 抽样要**分散到全书**，不能只看前几页。
+     实测踩过：一本书只有中间几页被 OCR 补过文字层，
+     而早期版本只探测前 12 页 → 判定"无文字层" → 高亮开关被错误置灰。
+
+     但抽样注定会漏（书里可能只有零星几页有文字），所以：
+       · 这里抽样只用来决定**开关的初始可用性**
+       · 真正的高亮由每页渲染时**逐页**判断（见 _pdfRenderPage），
+         有文字块就上色带，没有就安静跳过 —— 抽样漏掉也不影响正确性
+     另外探测本身有开销（要解压 CID 字体），所以给出进度提示。 */
+  const probePages = new Set([1]);
+  const step = Math.max(1, Math.floor(doc.numPages / 20));
+  for (let n = 1; n <= doc.numPages; n += step) probePages.add(n);
+  probePages.add(doc.numPages);
+
+  let textPages = 0, probed = 0;
+  for (const n of probePages) {
+    probed++;
+    if (probed % 4 === 0) setLoading(true, `正在检测文字层… ${probed}/${probePages.size}`);
+    try {
+      const page = n === 1 ? p1 : await doc.getPage(n);
+      const tc = await page.getTextContent();
+      if (tc.items.some(i => typeof i.str === 'string' && i.str.trim())) textPages++;
+    } catch (_) {}
+  }
+  pdfView.anyText = textPages > 0;
+  pdfView.textPageCount = textPages;
+  /* 抽样没命中时**不直接禁用**开关 —— 那样会把"零星几页有文字"的书
+     一刀切掉。改成允许打开：真有文字块的页会显示色带，没有的页
+     本来就不会画任何东西，没有任何副作用。
+     只有在**抽样确实翻了很多页且一页都没有**时，才认为是扫描件。 */
+  pdfView.looksScanned = textPages === 0;
+
+  // 首页尺寸之外的页，懒取真实尺寸
+  pdfView.pageSizes = pdfView.pageSizes || {};
+
+  // 元数据里的标题（有就用，没有就用文件名）
+  let title = fileName.replace(/\.pdf$/i, '');
+  try {
+    const meta = await doc.getMetadata();
+    const t = meta && meta.info && meta.info.Title;
+    if (t && String(t).trim()) title = String(t).trim();
+  } catch (_) {}
+
+  // 切到 PDF 模式
+  document.body.classList.add('pdf-mode');
+  $('#pdfHighlight').checked = pdfView.highlight;
+  document.body.classList.toggle('pdf-hl', pdfView.highlight);
+  $('#pdfBar').classList.remove('hidden');
+
+  pdfView.fitMode = 'width';
+  await _pdfBuildPlaceholders();
+  _pdfSetupObserver();
+
+  setLoading(false);
+  const sc = $('#scroller');
+  sc.scrollTop = 0;
+  _pdfUpdateBar();
+
+  /* 打开时的提示要**如实**。
+     抽样只是估算，会漏（实测一本只有 4 页有文字的书，20 页抽样全落空），
+     所以抽样没命中时不能用"扫描件"这种断言 —— 那会让用户以为
+     明明有文字的书坏了。改说"暂未发现"，并说明可以边看边确认。 */
+  if (pdfView.looksScanned) {
+    toast(`已打开《${title}》，共 ${doc.numPages} 页 · 抽样暂未发现文字层，`
+        + `翻几页看看有没有黄色高亮即可确认`, 5200);
+  } else {
+    toast(`已打开《${title}》，共 ${doc.numPages} 页 · 有文字层，可开启文字高亮`, 4200);
+  }
+
+  return {
+    title,
+    numPages: doc.numPages,
+    anyText: pdfView.anyText,          // 抽样结果（仅供调用方参考）
+    looksScanned: pdfView.looksScanned,
+  };
+}
+
+/* 关闭视图器（回首页/换书时调用） */
+function closePDFViewer() {
+  pdfView.token++;
+  if (pdfView.observer) { pdfView.observer.disconnect(); pdfView.observer = null; }
+  for (const n of [...pdfView.rendered.keys()]) _pdfUnrenderPage(n);
+  if (pdfView.doc) { try { pdfView.doc.destroy(); } catch (_) {} }
+  pdfView.doc = null;
+  pdfView.docId = '';
+  pdfView.numPages = 0;
+  pdfView.pageEls = [];
+  pdfView.rendered = new Map();
+  pdfView.anyText = false;
+  pdfView.looksScanned = false;
+  pdfView.textSeenPages = 0;
+  pdfView.renderedPages = 0;
+  document.body.classList.remove('pdf-mode', 'pdf-hl');
+  $('#pdfBar').classList.add('hidden');
+  $('#pdfPages').replaceChildren();
+  $('#pdfHighlight').checked = false;
+}
+
+/* 清掉重排阅读器的内容（切到 PDF 时调用）。
+   不销毁 state.prefs —— 用户切回来还要用。 */
+function closeReflowReader() {
+  state.renderToken++;          // 作废进行中的分章渲染
+  state.book = null;
+  state.chapter = 0;
+  $('#reader').replaceChildren();
+  $('#tocList').replaceChildren();
+  $('#tocSearch').value = '';
+  $('#pager').classList.add('hidden');
+  $('#scroller').scrollTop = 0;
+}
+
+/* --- PDF 阅读进度：与重排书的进度分开存 ---
+   重排书的进度是 {chapter, ratio}，PDF 是 {page}，语义不同，
+   混在一个键里会互相覆盖。 */
+const PDF_PROGRESS_KEY = 'bionic.pdfProgress.v1';
+
+function savePDFProgress() {
+  if (!pdfView.doc || !pdfView.docId) return;
+  try {
+    const all = JSON.parse(store.get(PDF_PROGRESS_KEY) || '{}');
+    all[pdfView.docId] = { page: pdfView.current, ts: Date.now() };
+    // 只留最近 20 本，免得无限膨胀
+    const keys = Object.keys(all).sort((a, b) => (all[b].ts || 0) - (all[a].ts || 0));
+    for (const k of keys.slice(20)) delete all[k];
+    store.set(PDF_PROGRESS_KEY, JSON.stringify(all));
+  } catch (_) {}
+}
+
+function loadPDFProgress(id) {
+  try {
+    const all = JSON.parse(store.get(PDF_PROGRESS_KEY) || '{}');
+    return all[id] || null;
+  } catch (_) { return null; }
+}
+
+let _pdfSaveTimer;
+function savePDFProgressDebounced() {
+  clearTimeout(_pdfSaveTimer);
+  _pdfSaveTimer = setTimeout(savePDFProgress, 500);
+}
+
+/* ============================================================
    4. 应用状态
    ============================================================ */
 const DEFAULTS = {
@@ -2086,6 +3048,14 @@ const DEFAULTS = {
   // 才会被置为 true（见 savePrefs）。历史遗留的 justify 没有这个标记，
   // 因此会被 loadPrefs() 迁移回 left。
   alignMigrated: false,
+
+  /* --- PDF 锚点高亮 ---
+     PDF 下不了"加粗"（文字已栅格化），只能加底色，
+     所以颜色和不透明度必须让用户可调：
+     底色一旦偏重就会糊住原图文字、妨碍阅读。
+     hlAlpha 默认 0.22 —— 比早期的 0.55 淡很多（早期"太黄了"）。 */
+  hlColor: '#ffd600',   // 高亮底色（黄/绿/红/蓝/紫 见 HL_COLORS）
+  hlAlpha: 22,          // 不透明度百分比 8~60
 };
 const PREF_KEY = 'bionic.prefs.v1';
 const PROGRESS_KEY = 'bionic.progress.v1';
@@ -2104,6 +3074,18 @@ const FONTS = {
 };
 const TINTS = ['#b4531f', '#1f5fb4', '#1f8a5b', '#8a1fb4', '#b41f4a', '#6b6862'];
 const TAIL_COLORS = ['#8a8680', '#5f5b55', '#3b3226', '#1f5fb4', '#b4531f'];
+/* PDF 锚点高亮的预设色。
+   选的都是"浅色荧光笔"路线 —— PDF 高亮是**压在原文之上的底色**，
+   不能用饱和深色，否则会盖住原图文字。所以这里给的是底色，
+   真正的浓淡由 hlAlpha（不透明度）控制。 */
+const HL_COLORS = [
+  { c: '#ffd600', n: '黄' },
+  { c: '#7ed957', n: '绿' },
+  { c: '#ff7b72', n: '红' },
+  { c: '#5ac8fa', n: '蓝' },
+  { c: '#c084fc', n: '紫' },
+  { c: '#ffb340', n: '橙' },
+];
 
 /* ============================================================
    5. 偏好读写与样式应用
@@ -2206,6 +3188,17 @@ function measureBoldInflation(font, size) {
   return (ratio > 0.0005 && ratio < 0.2) ? ratio : 0;
 }
 
+/* '#ffd600' → '255,214,0'（供 rgba(var(--x), a) 使用）。
+   解析失败时退回默认黄色 —— 不能让一个错色值把整个高亮弄没。 */
+function hexToRgbTriplet(hex) {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex || '').trim());
+  if (!m) return '255,214,0';
+  let h = m[1];
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  const n = parseInt(h, 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
+
 function applyPrefs() {
   const p = state.prefs;
   const root = document.documentElement;
@@ -2232,6 +3225,14 @@ function applyPrefs() {
   s.setProperty('--reader-width', p.width + 'em');
   s.setProperty('--reader-font', FONTS[p.font] || FONTS.serif);
   s.setProperty('--head-weight', p.mode === 'color' ? '400' : '700');
+
+  /* PDF 锚点高亮的底色与浓淡。
+     ★ 用 RGB 三元组 + 单独的 alpha 变量，而不是直接写 rgba()：
+       因为"整块高亮"档要把 alpha 再乘 0.75（面积大，重了会糊住原文），
+       拆开才能用 calc() 算。 */
+  const hlRgb = hexToRgbTriplet(p.hlColor);
+  s.setProperty('--pdf-hl-rgb', hlRgb);
+  s.setProperty('--pdf-hl-alpha', ((p.hlAlpha || 22) / 100).toFixed(2));
   // （此处原本写 --head-zoom；锚点缩放已移除，见 CSS 里的完整记录）
   // 合成加粗补偿：只在「加粗」生效且字体确实需要补偿时才非零。
   // 取值实测得到（见 measureBoldInflation），换字体/字号会自动重算。
@@ -2275,6 +3276,7 @@ function syncControls() {
   set('#rLh', p.lh);             txt('#vLh', (p.lh / 10).toFixed(1));
   set('#rPara', p.para);         txt('#vPara', (p.para / 10).toFixed(1) + 'em');
   set('#rWidth', p.width);       txt('#vWidth', p.width + '字');
+  set('#rHlAlpha', p.hlAlpha);   txt('#vHlAlpha', p.hlAlpha + '%');
 
   // 锚点色
   $$('#swatches .swatch').forEach(el => el.classList.toggle('on', el.dataset.color === p.tint));
@@ -2288,6 +3290,11 @@ function syncControls() {
   });
   const tp = $('#tailPicker');
   if (tp && /^#[0-9a-f]{6}$/i.test(p.tailColor)) tp.value = p.tailColor;
+
+  // PDF 高亮色
+  $$('#hlSwatches .swatch').forEach(el => el.classList.toggle('on', el.dataset.hl === p.hlColor));
+  const hp = $('#hlPicker');
+  if (hp && /^#[0-9a-f]{6}$/i.test(p.hlColor)) hp.value = p.hlColor;
 
   $('#btnBionic').classList.toggle('on', p.bionic);
 }
@@ -2526,9 +3533,11 @@ function loadProgress(id) {
    9. 打开文件
    ============================================================ */
 async function openFile(file) {
-  const name = file.name.replace(/\.(epub|txt)$/i, '');
+  const name = file.name.replace(/\.(epub|txt|pdf)$/i, '');
   const isEpub = /\.epub$/i.test(file.name) || file.type === 'application/epub+zip';
-  setLoading(true, isEpub ? '正在解压 EPUB…' : '正在读取文本…');
+  const isPdf  = /\.pdf$/i.test(file.name)  || file.type === 'application/pdf';
+
+  setLoading(true, isEpub ? '正在解压 EPUB…' : (isPdf ? '正在读取 PDF…' : '正在读取文本…'));
 
   try {
     const buf = await file.arrayBuffer();
@@ -2537,6 +3546,39 @@ async function openFile(file) {
     if (isEpub) {
       const parsed = await parseEPUB(buf, t => setLoading(true, t));
       book = parsed;
+    } else if (isPdf) {
+      /* ★ PDF 走**原版阅读器**，不进重排管线。
+         它不需要 chapters/paras，也不需要 OCR —— 直接按原版式显示。
+         所以这里提前 return，不碰 state.book / buildToc / renderChapter。 */
+      closeReflowReader();
+      const info = await openPDFViewer(buf, file.name);
+
+      // 复用顶栏与侧栏控件：PDF 用文件本身的页数，不做目录
+      $('#empty').classList.add('hidden');
+      $('#bookTitle').textContent = `${info.title} · PDF · ${info.numPages} 页`;
+      $('#btnHome').hidden = false;
+      /* ★ 只禁用「仿生开关」这一个按钮 —— 它是个二态开关，
+         PDF 下加粗做不到，留着会误导。
+         **设置面板必须保持可用**：PDF 高亮的颜色/不透明度就在里面，
+         早期把 #btnPanel 一起禁掉，等于把用户锁在门外
+         （"设置点不进去，就没法调高亮颜色"）。
+         面板里的仿生相关字段由 CSS 按 .pdf-mode 隐藏，见样式表。 */
+      $('#btnBionic').disabled = true;
+      $('#btnPanel').disabled = false;
+      $('#btnTheme').disabled = false;      // 主题仍可用于界面配色
+      $('#pager').classList.add('hidden');
+      $('#tocList').replaceChildren();
+      closeSidebar();
+      // PDF 的阅读进度：记住"上次看到第几页"，与重排书的进度分开存
+      pdfView.docId = `${file.name}|${file.size}|${file.lastModified}`;
+      const saved = loadPDFProgress(pdfView.docId);
+      if (saved && saved.page > 1) {
+        requestAnimationFrame(() => {
+          _pdfGotoPage(saved.page);
+          toast(`已跳转到上次阅读位置：第 ${saved.page} 页`, 3000);
+        });
+      }
+      return;
     } else {
       const text = decodeBuffer(buf);
       if (!text.trim()) throw new Error('文件是空的');
@@ -2545,6 +3587,9 @@ async function openFile(file) {
         ? { title: name, chapters, meta: `TXT · ${chapters.length} 章` }
         : { title: name, chapters: [{ title: '正文', body: text }], meta: `TXT · ${(text.length / 10000).toFixed(1)} 万字` };
     }
+
+    // 从 PDF 模式切回来（EPUB/TXT 走重排）
+    closePDFViewer();
 
     book.id = `${file.name}|${file.size}|${file.lastModified}`;
     book.meta = book.meta || (isEpub ? `EPUB · ${book.chapters.length} 章`
@@ -2586,6 +3631,27 @@ async function openFile(file) {
 /* 回到首页（空状态）：清空当前书，恢复初始界面。
    注意不清除用户偏好设置，只清书与进度显示。 */
 function goHome(confirmFirst = true) {
+  // PDF 模式：先存页码，再关视图器
+  if (pdfView.doc) {
+    if (confirmFirst) {
+      const t = $('#bookTitle').textContent || 'PDF';
+      if (!window.confirm(`关闭《${t}》并回到首页？\n（阅读位置已保存，下次打开同一个文件会自动恢复）`)) return;
+    }
+    savePDFProgress();
+    closePDFViewer();
+    $('#tocList').replaceChildren();
+    $('#scroller').scrollTop = 0;
+    $('#bookTitle').textContent = '未打开书籍';
+    $('#progress').style.width = '0%';
+    $('#empty').classList.remove('hidden');
+    $('#btnHome').hidden = true;
+    // 解除 PDF 模式下被禁用的入口
+    ['#btnBionic', '#btnPanel'].forEach(s => { const e = $(s); if (e) e.disabled = false; });    closeSidebar();
+    closePanel();
+    toast('已回到首页，可以打开另一本书', 2000);
+    return;
+  }
+
   if (!state.book) { $('#fileInput').click(); return; }
   if (confirmFirst) {
     const name = state.book.title;
@@ -2655,7 +3721,7 @@ This paragraph is written in English so you can compare how the algorithm behave
   buildToc();
   openSidebar();
   await renderChapter(0);
-  toast('这是示例文本，拖入你自己的 EPUB / TXT 看真实效果');
+  toast('这是示例文本，拖入你自己的 EPUB / TXT / PDF 看真实效果');
 }
 
 /* ============================================================
@@ -2780,6 +3846,19 @@ function bind() {
     });
   }
 
+  /* PDF 高亮色块。
+     ★ 色块本身要**带上当前的不透明度**预览 —— 否则选了个浅黄，
+       色块看着很淡，用户会以为没选中。用 rgba 铺底色即可。 */
+  const hlsw = $('#hlSwatches');
+  HL_COLORS.forEach(({ c, n }) => {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.dataset.hl = c;
+    b.style.background = c;
+    b.title = n + ' ' + c;
+    hlsw.appendChild(b);
+  });
+
   // --- 顶栏 ---
   $('#btnSidebar').onclick = toggleSidebar;
   $('#btnCloseSide').onclick = closeSidebar;
@@ -2866,6 +3945,19 @@ function bind() {
     applyPrefs();
   };
 
+  /* PDF 高亮：改色/改不透明度都**立刻生效**，不用重开 PDF。
+     实现上只是改两个 CSS 变量 —— 色带本身是 CSS 背景，
+     浏览器会自己重绘，不需要重建文字层。 */
+  $('#hlSwatches').onclick = e => {
+    const b = e.target.closest('.swatch'); if (!b) return;
+    state.prefs.hlColor = b.dataset.hl;
+    applyPrefs();
+  };
+  $('#hlPicker').oninput = e => {
+    state.prefs.hlColor = e.target.value;
+    applyPrefs();
+  };
+
   // 滑块：strength 需要重绘，其余只改 CSS 变量
   const live = (id, key, fn) => {
     $(id).addEventListener('input', e => {
@@ -2882,6 +3974,7 @@ function bind() {
   live('#rLh',    'lh',    v => state.prefs.lh = v);
   live('#rPara',  'para',  v => state.prefs.para = v);
   live('#rWidth', 'width', v => state.prefs.width = v);
+  live('#rHlAlpha', 'hlAlpha', v => state.prefs.hlAlpha = v);
 
   // --- 操作 ---
   $('#btnExport').onclick = exportHTML;
@@ -2956,8 +4049,65 @@ function bind() {
   // --- 滚动 ---
   $('#scroller').addEventListener('scroll', () => {
     updateProgress();
-    saveProgressDebounced();
+    if (pdfView.doc) {
+      // PDF 模式：更新工具栏页码/进度条，并防抖存页码
+      clearTimeout(pdfView.scrollTimer);
+      pdfView.scrollTimer = setTimeout(() => {
+        _pdfUpdateBar();
+        savePDFProgressDebounced();
+      }, 120);
+    } else {
+      saveProgressDebounced();
+    }
   }, { passive: true });
+
+  // --- PDF 工具栏 ---
+  $('#pdfZoomIn').addEventListener('click', async () => {
+    if (!pdfView.doc) return;
+    pdfView.fitMode = 'none';
+    pdfView.scale = Math.min(5, Math.round((pdfView.scale + 0.15) * 100) / 100);
+    await _pdfRescale();
+  });
+  $('#pdfZoomOut').addEventListener('click', async () => {
+    if (!pdfView.doc) return;
+    pdfView.fitMode = 'none';
+    pdfView.scale = Math.max(0.2, Math.round((pdfView.scale - 0.15) * 100) / 100);
+    await _pdfRescale();
+  });
+  $('#pdfFitWidth').addEventListener('click', async () => {
+    if (!pdfView.doc) return;
+    pdfView.fitMode = 'width';
+    await _pdfRescale();
+  });
+  $('#pdfFitPage').addEventListener('click', async () => {
+    if (!pdfView.doc) return;
+    pdfView.fitMode = 'page';
+    await _pdfRescale();
+  });
+  $('#pdfPrevPage').addEventListener('click', () => _pdfGotoPage(pdfView.current - 1, true));
+  $('#pdfNextPage').addEventListener('click', () => _pdfGotoPage(pdfView.current + 1, true));
+  $('#pdfHighlight').addEventListener('change', e => {
+    pdfView.highlight = e.target.checked;
+    document.body.classList.toggle('pdf-hl', pdfView.highlight);
+  });
+  // 页码输入框：回车或失焦时跳转
+  const pageCommit = () => {
+    const v = parseInt($('#pdfPageInput').value, 10);
+    if (Number.isFinite(v)) _pdfGotoPage(v);
+    else $('#pdfPageInput').value = String(pdfView.current);
+  };
+  $('#pdfPageInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { pageCommit(); $('#pdfPageInput').blur(); }
+  });
+  $('#pdfPageInput').addEventListener('blur', pageCommit);
+
+  // 窗口尺寸变化：适应模式下要重排
+  let _rzTimer;
+  window.addEventListener('resize', () => {
+    if (!pdfView.doc || pdfView.fitMode === 'none') return;
+    clearTimeout(_rzTimer);
+    _rzTimer = setTimeout(() => _pdfRescale(), 220);
+  });
 
   // --- 快捷键 ---
   window.addEventListener('keydown', e => {
@@ -2974,22 +4124,37 @@ function bind() {
       case 't': case 'T': $('#btnTheme').disabled  || $('#btnTheme').click();  break;
       case 'p': case 'P': $('#btnPanel').disabled  || $('#btnPanel').click();  break;
       case 's': case 'S': state.book && toggleSidebar(); break;
-      case 'h': case 'H': goHome(state.book ? true : false); break;
+      case 'h': case 'H': goHome(state.book || pdfView.doc ? true : false); break;
+      /* PDF 模式：上下键/PgUp/PgDn/空格翻页，与工具栏按钮一致。
+         单独的 + / - 用于缩放（也在 PDF 工具栏里）。 */
+      case '+': case '=':
+        if (pdfView.doc) { e.preventDefault(); $('#pdfZoomIn').click(); } break;
+      case '-': case '_':
+        if (pdfView.doc) { e.preventDefault(); $('#pdfZoomOut').click(); } break;
       /* ★ 翻章为唯一的翻页动作（没有"翻屏"）。
          所以方向键、PgUp/PgDn、空格全部走"上一章/下一章"，
          与底部条的两个按钮完全一致 —— 不给用户两套语义。
          Home/End 仍保留"回到章首/跳到章末"（章内定位，不影响章节切换）。 */
       case 'ArrowLeft': case 'ArrowUp': case 'PageUp':
-        if (state.book) { e.preventDefault(); prevChapter(); } break;
+        if (pdfView.doc) { e.preventDefault(); _pdfGotoPage(pdfView.current - 1, true); }
+        else if (state.book) { e.preventDefault(); prevChapter(); }
+        break;
       case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ':
-        if (state.book) { e.preventDefault(); nextChapter(); } break;
-      case 'Home':       if (state.book) { e.preventDefault(); $('#scroller').scrollTop = 0; updatePager(); } break;
-      case 'End':        if (state.book) {
-                           e.preventDefault();
-                           const sc = $('#scroller');
-                           sc.scrollTop = sc.scrollHeight;
-                           updatePager();
-                         } break;
+        if (pdfView.doc) { e.preventDefault(); _pdfGotoPage(pdfView.current + 1, true); }
+        else if (state.book) { e.preventDefault(); nextChapter(); }
+        break;
+      case 'Home':
+        if (pdfView.doc) { e.preventDefault(); _pdfGotoPage(1); }
+        else if (state.book) { e.preventDefault(); $('#scroller').scrollTop = 0; updatePager(); }
+        break;
+      case 'End':
+        if (pdfView.doc) { e.preventDefault(); _pdfGotoPage(pdfView.numPages); }
+        else if (state.book) {
+          e.preventDefault();
+          const sc = $('#scroller');
+          sc.scrollTop = sc.scrollHeight;
+          updatePager();
+        } break;
     }
   });
 

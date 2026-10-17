@@ -23,6 +23,19 @@ tests/big.epub
 .DS_Store
 Thumbs.db
 
+# OCR 中间产物
+#   .ocr-tmp/ 是 pdf_ocr.py 落盘待识别的页面 PNG（每页几百 KB，跑完自动清）
+#   *.ocr.pdf 是 OCR 输出，体积通常比原书还大（原图 + 文字层），不该进仓库
+ocr/.ocr-tmp/
+*.ocr.pdf
+ocr/rendered/
+
+# Python 虚拟环境与缓存（OCR 桥接用）
+__pycache__/
+*.pyc
+.venv/
+venv/
+
 # 临时文件
 *.bak
 *.tmp

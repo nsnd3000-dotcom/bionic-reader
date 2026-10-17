@@ -20,8 +20,16 @@ const eq = (a, e, n) => JSON.stringify(a) === JSON.stringify(e)
 // 取出 <style> 内容，并去掉注释（注释里提到 backdrop-filter 不算数）
 const rawStyle = html.slice(html.indexOf('<style'), html.indexOf('</style>'));
 const style = rawStyle.replace(/\/\*[\s\S]*?\*\//g, '');
+/* 取某个选择器的规则体。
+   ★ 必须**行首锚定**（m 标志 + ^\s*）：不加锚定的话，
+     `#pager` 会先命中样式表里更早出现的
+     `body.pdf-mode #pager{display:none}`（复合选择器里的子串），
+     取回一个 `display:none` 的规则体，导致
+     "底部条有毛玻璃" 这类断言无故失败。
+     踩过一次：给 PDF 模式加显隐规则时，把 #pager 的检查带偏了。 */
 const ruleOf = sel => {
-  const m = style.match(new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}'));
+  const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = style.match(new RegExp('^\\s*' + esc + '\\s*\\{([^}]*)\\}', 'm'));
   return m ? m[1] : '';
 };
 
