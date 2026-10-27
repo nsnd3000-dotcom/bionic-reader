@@ -754,8 +754,14 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-ra
 #empty{
   position:absolute;inset:0;display:flex;
   align-items:center;justify-content:center;
+  /* ★ 首页整体上移：flex 居中是按"上下剩余空间"平分，
+     所以想让卡片中心上移 L，就给下内边距多加 2L（上移量由 --home-lift 控制，
+     改这一个值即可；用 vh 是为了不同窗口高度下上移比例一致）。
+     不用 transform:translateY —— 拖动文件时 .drop-card.over 会用 transform
+     做放大，两者写在同一属性上会互相覆盖。 */
+  --home-lift:5vh;
   /* 竖向留白小一点（窗口矮时卡片不至于顶到边），横向留足 */
-  padding:20px 24px;
+  padding:20px 24px calc(20px + var(--home-lift) * 2);
   z-index:20;
   background-color:var(--bg);
   background-image:url("bg-library.jpg");
@@ -770,29 +776,30 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-ra
   content:'';position:absolute;inset:0;pointer-events:none;
   background:
     radial-gradient(120% 90% at 50% 40%,
-      color-mix(in srgb, var(--bg) 34%, transparent) 0%,
-      color-mix(in srgb, var(--bg) 62%, transparent) 55%,
-      color-mix(in srgb, var(--bg) 82%, transparent) 100%);
+      color-mix(in srgb, var(--bg) 22%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 46%, transparent) 55%,
+      color-mix(in srgb, var(--bg) 70%, transparent) 100%);
 }
 #empty.hidden{display:none}
 /* 卡片要浮在遮罩之上 */
 #empty > *{position:relative;z-index:1}
 
-/* ★ 卡片的竖向节奏（原来是"上紧下松"）：
-     旧值：图标→标题 18 / 标题→说明 9 / 说明→按钮 20 / 按钮→提示 -8(!) / 提示→列表 16
-   问题：
-     1) 标题和说明只隔 9px，挤在一起；
-     2) .fmt-tip 用了 margin-top:-8px 把提示**硬拽**到按钮下方，几乎贴住；
-     3) .fmt-list 上方 22+18=40px，比其它间隙大一倍多，显得"下面空一大块"。
-   现在改成一套统一的间距阶梯（用 --gap 系列便于整体缩放）：
-     图标 →4→ 标题 →10→ 说明 →22→ 按钮 →10→ 提示 →(分隔线)→ 列表 */
+/* ★ 卡片的竖向节奏：统一间距阶梯。
+   各块之间一律 18px（图标→标题→说明→按钮→提示→列表），
+   不再出现"按钮上方一大段、提示紧贴按钮"的忽宽忽窄。
+   卡片文字用思源宋体（Noto Serif SC），与阅读正文的衬线气质一致。 */
 .drop-card{
-  --card-pad:44px;
+  --card-pad:40px;
+  --row-gap:18px;                 /* 所有行间距的统一值 */
   width:min(560px,100%);text-align:center;
   padding:var(--card-pad) 36px;
   border-radius:20px;
-  /* 毛玻璃三件套：半透明底 + 背景模糊 + 细高光边 */
-  background:color-mix(in srgb, var(--bg-elev) 62%, transparent);
+  font-family:"Noto Serif SC","Source Han Serif SC","Songti SC","SimSun",Georgia,serif;
+  /* 卡片内所有文字整体加粗：这里给基准字重，子元素继承；
+     按钮、列表小标题这类自己声明过 font-weight 的，下面单独提到 700 */
+  font-weight:600;
+  /* 毛玻璃：底色压得更透（62%→40%），照片细节能透上来 */
+  background:color-mix(in srgb, var(--bg-elev) 40%, transparent);
   backdrop-filter:blur(22px) saturate(160%);
   -webkit-backdrop-filter:blur(22px) saturate(160%);
   border:1px solid color-mix(in srgb, #fff 46%, transparent);
@@ -806,21 +813,22 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-ra
 }
 .drop-card.over{
   border-color:var(--accent);
-  background:color-mix(in srgb, var(--accent-soft) 72%, transparent);
+  background:color-mix(in srgb, var(--accent-soft) 55%, transparent);
   transform:scale(1.012);
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, #fff 60%, transparent),
     0 14px 48px color-mix(in srgb, var(--accent) 30%, transparent),
     0 2px 8px rgba(20,18,16,.12);
 }
-.drop-card .big{font-size:42px;line-height:1;margin-bottom:4px}
+.drop-card .big{font-size:42px;line-height:1;margin-bottom:var(--row-gap)}
 .drop-card h1{
-  font-size:21px;font-weight:680;letter-spacing:-.01em;
-  line-height:1.4;margin:0 0 10px;
+  /* 放大标题：21px → 26px，与下方正文拉开层级 */
+  font-size:26px;font-weight:700;letter-spacing:.01em;
+  line-height:1.4;margin:0 0 var(--row-gap);
 }
 .drop-card p{
-  font-size:13.5px;color:var(--text-dim);line-height:1.8;
-  margin:0 auto 22px;max-width:42ch;   /* 限宽，避免折行长度不齐 */
+  font-size:13.5px;color:var(--text-dim);line-height:1.85;
+  margin:0 auto var(--row-gap);max-width:42ch;   /* 限宽，避免折行长度不齐 */
 }
 .btn-row{display:flex;gap:9px;justify-content:center;flex-wrap:wrap}
 .btn{
@@ -831,11 +839,13 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-ra
   transition:.13s;box-shadow:0 1px 2px rgba(0,0,0,.14);
   border:1px solid transparent;
 }
+/* 首页卡片里的按钮跟着一起加粗（.btn 自己的 600 会盖掉继承值） */
+.drop-card .btn{font-weight:700}
 .btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
 .btn:active{transform:translateY(0)}
 /* 次按钮也是玻璃：与卡片同材质，只是更淡 */
 .btn.ghost{
-  background:color-mix(in srgb, var(--bg-elev) 34%, transparent);
+  background:color-mix(in srgb, var(--bg-elev) 24%, transparent);
   color:var(--text-dim);
   border:1px solid color-mix(in srgb, #fff 40%, var(--border));
   backdrop-filter:blur(10px) saturate(140%);
@@ -845,33 +855,37 @@ input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-ra
 .btn.ghost:hover{
   color:var(--text);
   border-color:color-mix(in srgb, #fff 60%, var(--border-strong));
-  background:color-mix(in srgb, var(--bg-elev) 52%, transparent);
+  background:color-mix(in srgb, var(--bg-elev) 40%, transparent);
 }
-/* 提示：原来用负 margin 硬拽，现在给正常的 10px 间距 */
-.fmt-tip{
+/* 提示与列表：行间距同样收敛到 --row-gap，不再"上紧下松"。
+   ★ 选择器必须写成 `.drop-card .fmt-tip`：它本身就是 <p>，
+     而 `.drop-card p{margin:0 auto 18px}`（0,1,1）的优先级高于
+     单类 `.fmt-tip`（0,1,0），旧的写法让这里的 margin-top 被整条覆盖成 0，
+     于是提示文字紧贴按钮底边。两个类（0,2,0）才压得住。 */
+.drop-card .fmt-tip{
   font-size:11.5px;color:var(--text-faint);
-  line-height:1.65;margin:10px auto 0;max-width:40ch;
+  line-height:1.65;margin:var(--row-gap, 18px) auto 0;max-width:40ch;
 }
 .fmt-list{
-  display:flex;gap:16px;justify-content:center;flex-wrap:wrap;
-  margin-top:20px;padding-top:18px;
-  border-top:1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  display:flex;gap:18px;justify-content:center;flex-wrap:wrap;
+  margin-top:var(--row-gap, 18px);padding-top:var(--row-gap, 18px);
+  border-top:1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .fmt-list div{font-size:11.5px;color:var(--text-faint);line-height:1.65}
-.fmt-list b{display:block;color:var(--text-dim);font-size:12px;font-weight:600;margin-bottom:3px}
+.fmt-list b{display:block;color:var(--text-dim);font-size:12px;font-weight:700;margin-bottom:3px}
 
 /* 深色主题：照片偏亮，压暗玻璃并加强模糊，否则白字浮在亮墙上读不清 */
 html[data-theme="dark"] #empty::before{
   background:
     radial-gradient(120% 90% at 50% 40%,
-      rgba(10,11,13,.62) 0%,
-      rgba(10,11,13,.74) 55%,
-      rgba(10,11,13,.86) 100%);
+      rgba(10,11,13,.48) 0%,
+      rgba(10,11,13,.62) 55%,
+      rgba(10,11,13,.78) 100%);
 }
 /* 深色主题下的阅读区背景已上移到 body 附近，
    由 html[data-bg="image"][data-theme="dark"] 统一处理（避免两处规则打架） */
 html[data-theme="dark"] .drop-card{
-  background:rgba(28,30,35,.52);
+  background:rgba(28,30,35,.40);
   border-color:rgba(255,255,255,.12);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.10),
@@ -968,6 +982,156 @@ html[data-theme="dark"] .btn.ghost:hover{
   .brand .txt{display:none}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation-duration:.01ms!important}}
+
+/* ============================================================
+   ★ 荧光笔高亮 / 笔记批注
+
+   三件事的样式都在这里：
+     1) 正文里的高亮 <mark class="anno">（颜色由 --ac 变量逐条设置）
+     2) 选中文字后浮出的荧光笔工具条 #selBar
+     3) 点击高亮弹出的批注层 #annoPop
+   侧栏「笔记」页签的列表样式也在此（.anno-item 系列）。
+
+   高亮底色用 color-mix 调透明度：批注色本身保持饱和，
+   压到正文上时才降到 34%，深浅主题下都不会糊住文字。
+   ============================================================ */
+mark.anno{
+  background:color-mix(in srgb, var(--ac, #ffd600) 34%, transparent);
+  color:inherit;
+  padding:0 .02em;border-radius:2px;
+  cursor:pointer;
+  border-bottom:2px solid transparent;
+}
+mark.anno:hover{
+  background:color-mix(in srgb, var(--ac, #ffd600) 50%, transparent);
+}
+/* 带笔记的高亮：底部一条实色小横线作记号 */
+mark.anno.has-note{border-bottom:2px solid var(--ac, #ffd600)}
+/* 从笔记列表跳转过来时的闪烁提示 */
+@keyframes annoFlash{
+  0%,100%{box-shadow:0 0 0 0 transparent}
+  30%{box-shadow:0 0 0 5px color-mix(in srgb, var(--ac, #ffd600) 62%, transparent)}
+}
+mark.anno.anno-flash{animation:annoFlash .8s ease 2}
+
+/* 选中文字后的浮动工具条（荧光笔） */
+#selBar{
+  position:fixed;z-index:120;
+  display:flex;align-items:center;gap:9px;
+  padding:7px 11px;border-radius:12px;
+  background:var(--glass-bg-strong);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  box-shadow:var(--shadow-lg);
+}
+#selBar[hidden]{display:none}
+.sel-swatches{display:flex;gap:6px}
+.sel-dot{
+  width:20px;height:20px;border-radius:50%;padding:0;cursor:pointer;
+  border:2px solid color-mix(in srgb, #fff 62%, transparent);
+  box-shadow:0 1px 4px rgba(0,0,0,.28);
+  transition:transform .12s;
+}
+.sel-dot:hover{transform:scale(1.15)}
+.sel-act{
+  border:1px solid var(--border);border-radius:8px;
+  background:var(--bg-elev);color:var(--text);
+  font-size:12px;padding:4px 9px;cursor:pointer;white-space:nowrap;
+}
+.sel-act:hover{border-color:var(--accent);color:var(--accent)}
+
+/* 批注弹层：点已有高亮时弹出（看笔记 / 改色 / 编辑 / 删除） */
+#annoPop{
+  position:fixed;z-index:130;width:min(320px, calc(100vw - 24px));
+  padding:13px 14px;border-radius:14px;
+  background:var(--glass-bg-strong);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  box-shadow:var(--shadow-lg);
+}
+#annoPop[hidden]{display:none}
+.ap-excerpt{
+  font-size:12.5px;line-height:1.6;color:var(--text-dim);
+  max-height:4.8em;overflow:hidden;
+  border-left:3px solid var(--apc, var(--border-strong));
+  padding-left:8px;margin-bottom:10px;
+}
+.ap-colors{display:flex;gap:7px;margin-bottom:10px}
+.ap-dot{
+  width:22px;height:22px;border-radius:50%;padding:0;cursor:pointer;
+  border:2px solid transparent;
+  box-shadow:0 1px 4px rgba(0,0,0,.25);
+}
+.ap-dot.on{border-color:var(--text);transform:scale(1.1)}
+#apNote{
+  width:100%;resize:vertical;min-height:56px;max-height:180px;
+  font:13px/1.6 inherit;color:var(--text);
+  border:1px solid var(--border);border-radius:8px;
+  background:var(--bg-sunken);padding:7px 9px;margin-bottom:10px;
+}
+#apNote:focus{outline:2px solid var(--accent);outline-offset:-1px;background:var(--bg-elev)}
+.ap-row{display:flex;gap:8px;align-items:center}
+.ap-flex{flex:1}
+.ap-btn{
+  font-size:12.5px;padding:5px 12px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--border);background:var(--bg-elev);color:var(--text);
+}
+.ap-btn:hover{border-color:var(--accent);color:var(--accent)}
+.ap-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.ap-btn.primary:hover{filter:brightness(1.08);color:#fff}
+.ap-btn.danger{color:#b43a3a}
+.ap-btn.danger:hover{border-color:#b43a3a;color:#b43a3a}
+
+/* 侧栏页签：目录 / 笔记 */
+.side-tabs{display:flex;gap:4px}
+.side-tab{
+  font-size:12px;font-weight:600;color:var(--text-faint);
+  padding:4px 11px;border-radius:8px;cursor:pointer;border:none;background:none;
+}
+.side-tab:hover{color:var(--text)}
+.side-tab.on{background:var(--accent-soft);color:var(--accent)}
+.anno-count{
+  display:inline-block;min-width:16px;text-align:center;
+  font:600 10px/1.4 ui-monospace,monospace;
+  background:var(--accent);color:#fff;border-radius:8px;padding:0 4px;
+  vertical-align:1px;
+}
+.side-pane{flex:1;display:flex;flex-direction:column;min-height:0}
+.side-pane[hidden]{display:none}
+#annoSearch{
+  margin:0 12px 8px;height:32px;padding:0 10px;flex:0 0 auto;
+  font:13px inherit;border:1px solid var(--border);border-radius:7px;
+  background:var(--bg-sunken);color:var(--text);width:calc(100% - 24px);
+}
+#annoSearch:focus{outline:2px solid var(--accent);outline-offset:-1px;background:var(--bg-elev)}
+#annoList{flex:1;overflow-y:auto;padding:0 8px 20px;scrollbar-width:thin}
+.anno-item{
+  display:block;width:100%;text-align:left;cursor:pointer;
+  padding:9px 10px;border-radius:9px;border:none;background:none;
+  margin-bottom:3px;color:var(--text);
+}
+.anno-item:hover{background:var(--bg-sunken)}
+.anno-item .ai-top{display:flex;align-items:center;gap:7px;margin-bottom:3px}
+.anno-item .ai-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.anno-item .ai-ch{
+  font-size:11px;color:var(--text-faint);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;
+}
+.anno-item .ai-del{
+  border:none;background:none;color:var(--text-faint);cursor:pointer;
+  font-size:12px;padding:1px 5px;border-radius:5px;flex:0 0 auto;
+}
+.anno-item .ai-del:hover{color:#b43a3a;background:var(--bg-elev)}
+.anno-item .ai-text{
+  font-size:12.5px;line-height:1.55;color:var(--text);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.anno-item .ai-note{
+  font-size:12px;line-height:1.5;color:var(--text-dim);margin-top:3px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.anno-item .ai-note::before{content:'✎ ';color:var(--text-faint)}
+.anno-empty{padding:18px 12px;font-size:12.5px;color:var(--text-faint);line-height:1.8}
 </style>
 </head>
 <body>
@@ -979,6 +1143,7 @@ html[data-theme="dark"] .btn.ghost:hover{
     <button class="brand" id="btnBrand" title="回到首页" style="cursor:pointer"><span class="dot"></span><span class="txt">Bionic Reader</span></button>
     <div id="bookTitle">未打开书籍</div>
     <div class="tb-group">
+      <button class="tb-btn icon" id="btnAnnos" title="高亮与笔记 (N)">✎</button>
       <button class="tb-btn" id="btnHome" title="换一本书 / 回到首页 (H)" hidden>
         <span class="home-ico">⌂</span><span>换一本</span>
       </button>
@@ -996,11 +1161,20 @@ html[data-theme="dark"] .btn.ghost:hover{
     <!-- 目录 -->
     <aside id="sidebar" class="hidden">
       <div class="side-head">
-        <h2>目录</h2>
+        <div class="side-tabs">
+          <button class="side-tab on" id="tabToc">目录</button>
+          <button class="side-tab" id="tabAnno">笔记 <b id="annoCount" class="anno-count" hidden></b></button>
+        </div>
         <button class="tb-btn icon" id="btnCloseSide" title="收起">✕</button>
       </div>
-      <input id="tocSearch" type="search" placeholder="搜索章节…" autocomplete="off">
-      <nav id="tocList"></nav>
+      <div class="side-pane" id="tocPane">
+        <input id="tocSearch" type="search" placeholder="搜索章节…" autocomplete="off">
+        <nav id="tocList"></nav>
+      </div>
+      <div class="side-pane" id="annoPane" hidden>
+        <input id="annoSearch" type="search" placeholder="搜索高亮内容或笔记…" autocomplete="off">
+        <div id="annoList"></div>
+      </div>
     </aside>
 
     <!-- 阅读区 -->
@@ -1208,7 +1382,8 @@ html[data-theme="dark"] .btn.ghost:hover{
         </div>
         <div class="hint">
           快捷键：<code>B</code> 仿生 · <code>T</code> 主题 · <code>P</code> 设置 · <code>S</code> 目录 ·
-          <code>H</code> 换一本 · <code>Esc</code> 关闭面板<br>
+          <code>N</code> 笔记 · <code>H</code> 换一本 · <code>Esc</code> 关闭面板<br>
+          划线：选中文字弹出荧光笔，点色块高亮、点「✎ 笔记」写批注；点已有高亮可改色/编辑/删除。<br>
           翻章：<code>← →</code> / <code>↑ ↓</code> / <code>空格</code> / <code>PgUp PgDn</code> ·
           <code>Home</code>/<code>End</code> 章首/章末
         </div>
@@ -1221,6 +1396,26 @@ html[data-theme="dark"] .btn.ghost:hover{
 
 <!-- 全屏拖放提示 -->
 <div id="dropOverlay"><span>松手即导入 📥</span></div>
+
+<!-- 选中文字后浮出的荧光笔工具条（色块由 JS 按 HL_COLORS 生成） -->
+<div id="selBar" hidden>
+  <div class="sel-swatches" id="selSwatches"></div>
+  <button class="sel-act" id="selNote" title="高亮这段并立即写笔记">✎ 笔记</button>
+</div>
+
+<!-- 点击已有高亮弹出的批注层：看摘录 / 改色 / 写笔记 / 删除 -->
+<div id="annoPop" hidden>
+  <div class="ap-excerpt" id="apExcerpt"></div>
+  <div class="ap-colors" id="apColors"></div>
+  <textarea id="apNote" rows="3" placeholder="给这段高亮写点批注…"></textarea>
+  <div class="ap-row">
+    <button class="ap-btn danger" id="apDelete">删除高亮</button>
+    <span class="ap-flex"></span>
+    <button class="ap-btn" id="apClose">关闭</button>
+    <button class="ap-btn primary" id="apSave">保存笔记</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 <input type="file" id="fileInput" accept=".epub,.txt,.pdf,text/plain,application/epub+zip,application/pdf" hidden>
 
@@ -2985,6 +3180,9 @@ function closeReflowReader() {
   state.renderToken++;          // 作废进行中的分章渲染
   state.book = null;
   state.chapter = 0;
+  state.annos = [];             // 批注是按书存的，关书即卸下
+  hideSelBar(); closeAnnoPop();
+  buildAnnoList();
   $('#reader').replaceChildren();
   $('#tocList').replaceChildren();
   $('#tocSearch').value = '';
@@ -3318,6 +3516,8 @@ async function renderChapter(idx, keepScroll = false) {
 
   // 懒解析段落：首次访问时才切分
   if (!ch.paras) ch.paras = toParagraphs(ch.body);
+  // 本章的高亮按段号归堆，渲染时逐段回贴 <mark>
+  buildAnnoMap(idx);
 
   scroller.style.overflowY = 'hidden';
   reader.replaceChildren();
@@ -3334,13 +3534,16 @@ async function renderChapter(idx, keepScroll = false) {
   const paras = ch.paras;
   for (let i = 0; i < paras.length; i++) {
     const para = paras[i];
+    let el;
     if (para.type === 'h3') {
-      const h = document.createElement('h3');
-      h.textContent = para.text;
-      frag.appendChild(h);
+      el = document.createElement('h3');
+      el.textContent = para.text;
     } else {
-      frag.appendChild(makePara(para.text, { strength: p.strength, bionic: p.bionic, indent: true }));
+      el = makePara(para.text, { strength: p.strength, bionic: p.bionic, indent: true });
     }
+    el.dataset.pidx = i;              // 段号是高亮坐标的一半（见 8b 节）
+    applyAnnosToPara(el, i);          // 有荧光笔批注就贴 <mark>
+    frag.appendChild(el);
     if (i % BATCH === BATCH - 1) {
       reader.appendChild(frag);              // 分批挂载，避免长时间白屏
       await yieldToUI();
@@ -3530,6 +3733,325 @@ function loadProgress(id) {
 }
 
 /* ============================================================
+   8b. 荧光笔高亮与笔记批注
+
+   数据模型（localStorage，key 见 ANNO_KEY，按书 id 分组）：
+
+     { [bookId]: [ { id, ch, ps, so, pe, eo, color, text, note, ts } ] }
+
+   定位坐标 = (章号 ch, 起始段 ps + 段内偏移 so, 结束段 pe + 段内偏移 eo)。
+   段内偏移是相对 para.text 纯文本的字符偏移 —— 与仿生阅读把段落切成
+   多少个 <span> 无关，所以开关仿生、改强度、改字号之后高亮**位置不变**，
+   每次渲染时按坐标重新贴 <mark> 即可（applyAnnosToPara）。
+
+   只对重排阅读（EPUB/TXT）开放：PDF 的文字层是整页对齐的透明 span，
+   坐标体系完全不同，PDF 侧保留它自己的"文字高亮"开关，不做批注。
+   ============================================================ */
+const ANNO_KEY = 'bionic.annos.v1';
+
+state.annos = [];            // 当前书的全部高亮/批注
+let annoMap = new Map();     // 当前章：段号 -> [{id,color,start,end,note}]
+let pendingSel = null;       // 浮动工具条待命的选区坐标
+let popAnnoId = null;        // 批注弹层正在编辑的高亮 id
+
+/* ---- 持久化 ---- */
+function _annoAll() {
+  try { return JSON.parse(store.get(ANNO_KEY) || '{}'); } catch (_) { return {}; }
+}
+function loadAnnos(bookId) {
+  const all = _annoAll();
+  state.annos = Array.isArray(all[bookId]) ? all[bookId] : [];
+}
+function persistAnnos() {
+  if (!state.book) return;
+  const all = _annoAll();
+  if (state.annos.length) all[state.book.id] = state.annos;
+  else delete all[state.book.id];           // 删光了就别留空数组占位置
+  store.set(ANNO_KEY, JSON.stringify(all));
+}
+
+/* ---- 选区 → 坐标 ---- */
+/* 元素内纯文本偏移：逐文本节点累加长度，不用 Range.toString()
+   （jsdom 等环境对 Range 的支持不全，手写遍历最稳）。 */
+function _offsetInHost(host, node, offset) {
+  const tw = document.createTreeWalker(host, 4 /* SHOW_TEXT */);
+  let pos = 0, n;
+  while ((n = tw.nextNode())) {
+    if (n === node) return pos + offset;
+    pos += n.data.length;
+  }
+  return pos;   // 没命中（理论上不会）：按段尾处理
+}
+function _pidxHost(node) {
+  const el = node.nodeType === 3 ? node.parentNode : node;
+  return el && el.closest ? el.closest('[data-pidx]') : null;
+}
+
+/* 读完当前选区，换算成批注坐标；无效选区返回 null */
+function captureSelection() {
+  const sel = window.getSelection();
+  if (!state.book || pdfView.doc || !sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const r = sel.getRangeAt(0);
+  const reader = $('#reader');
+  if (!reader.contains(r.commonAncestorContainer)) return null;
+  const h1 = _pidxHost(r.startContainer), h2 = _pidxHost(r.endContainer);
+  if (!h1 || !h2) return null;
+  const a = { p: +h1.dataset.pidx, o: _offsetInHost(h1, r.startContainer, r.startOffset) };
+  const b = { p: +h2.dataset.pidx, o: _offsetInHost(h2, r.endContainer, r.endOffset) };
+  const fwd = a.p < b.p || (a.p === b.p && a.o <= b.o);
+  const ps = fwd ? a.p : b.p, so = fwd ? a.o : b.o;
+  const pe = fwd ? b.p : a.p, eo = fwd ? b.o : a.o;
+  if (ps === pe && so >= eo) return null;
+  return { ch: state.chapter, ps, so, pe, eo };
+}
+
+/* ---- 浮动工具条 ---- */
+function showSelBar() {
+  const sel = window.getSelection();
+  const bar = $('#selBar');
+  if (!sel || !sel.rangeCount) return;
+  /* jsdom 等环境 Range 没有 getBoundingClientRect，兜底放窗口顶部 */
+  let rect = null;
+  try { rect = sel.getRangeAt(0).getBoundingClientRect(); } catch (_) {}
+  if (!rect) rect = { left: window.innerWidth / 2, top: 90, width: 0, bottom: 110 };
+  bar.hidden = false;
+  const bw = bar.offsetWidth || 240;
+  let x = rect.left + rect.width / 2 - bw / 2;
+  x = Math.max(8, Math.min(x, window.innerWidth - bw - 8));
+  let y = rect.top - bar.offsetHeight - 10;
+  if (y < 8) y = rect.bottom + 10;      // 上方没地方就放选区下面
+  bar.style.left = x + 'px';
+  bar.style.top = y + 'px';
+}
+function hideSelBar() { $('#selBar').hidden = true; pendingSel = null; }
+
+/* 与已有高亮是否重叠（线性比较 (段号, 偏移)） */
+function _annoOverlaps(sel) {
+  const lt = (p1, o1, p2, o2) => p1 < p2 || (p1 === p2 && o1 < o2);
+  return state.annos.find(a =>
+    a.ch === sel.ch && lt(a.ps, a.so, sel.pe, sel.eo) && lt(sel.ps, sel.so, a.pe, a.eo));
+}
+
+function addAnno(color, withNote = false) {
+  if (!pendingSel || !state.book) return;
+  const sel = pendingSel;
+  if (_annoOverlaps(sel)) {
+    toast('选区与已有高亮重叠，请先点旧高亮删除或调整');
+    return;
+  }
+  const ch = state.book.chapters[sel.ch];
+  if (!ch.paras) ch.paras = toParagraphs(ch.body);
+  let text = '';
+  for (let p = sel.ps; p <= sel.pe && p < ch.paras.length; p++) {
+    const t = ch.paras[p].text;
+    text += t.slice(p === sel.ps ? sel.so : 0, p === sel.pe ? sel.eo : t.length);
+    if (p < sel.pe) text += ' ';
+  }
+  const a = {
+    id: 'a' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    ch: sel.ch, ps: sel.ps, so: sel.so, pe: sel.pe, eo: sel.eo,
+    color, text: text.trim().slice(0, 300), note: '', ts: Date.now(),
+  };
+  state.annos.push(a);
+  persistAnnos();
+  hideSelBar();
+  window.getSelection()?.removeAllRanges();
+  buildAnnoList($('#annoSearch').value);
+  // 重绘当前章把 <mark> 贴上（keepScroll：内容没变，滚动位置不用动）
+  renderChapter(state.chapter, true).then(() => {
+    if (withNote) {
+      const m = document.querySelector(`mark[data-aid="${a.id}"]`);
+      if (m) openAnnoPop(a.id, m);
+    }
+  });
+  toast(withNote ? '已高亮，写点笔记吧' : '已高亮');
+}
+
+/* ---- 渲染时回贴高亮 ---- */
+/* 把当前章的批注按段号整理成 annoMap（渲染前调用一次） */
+function buildAnnoMap(chIdx) {
+  annoMap = new Map();
+  const ch = state.book && state.book.chapters[chIdx];
+  if (!ch || !ch.paras) return;
+  for (const a of state.annos) {
+    if (a.ch !== chIdx) continue;
+    for (let p = a.ps; p <= a.pe && p < ch.paras.length; p++) {
+      const len = ch.paras[p].text.length;
+      const start = p === a.ps ? Math.min(a.so, len) : 0;
+      const end = p === a.pe ? Math.min(a.eo, len) : len;
+      if (end <= start) continue;
+      if (!annoMap.has(p)) annoMap.set(p, []);
+      annoMap.get(p).push({ id: a.id, color: a.color, start, end, hasNote: !!a.note });
+    }
+  }
+  for (const list of annoMap.values()) list.sort((x, y) => x.start - y.start);
+}
+
+/* 在单个段落元素里包 [start,end) 区间为 <mark class="anno">。
+   先收集再修改（TreeWalker 遍历时改 DOM 会乱）；
+   每段区间独立调用，创建时已保证互不重叠。 */
+function _wrapRangeInMarks(host, seg) {
+  const tw = document.createTreeWalker(host, 4);
+  const hits = [];
+  let pos = 0, n;
+  while ((n = tw.nextNode())) {
+    const t0 = pos, t1 = pos + n.data.length;
+    if (t1 > seg.start && t0 < seg.end) hits.push({ n, t0, t1 });
+    pos = t1;
+    if (pos >= seg.end) break;
+  }
+  for (const { n, t0, t1 } of hits) {
+    let node = n;
+    if (t1 > seg.end) node.splitText(seg.end - t0);   // 先切掉尾巴
+    let target = node;
+    if (t0 < seg.start) target = node.splitText(seg.start - t0);  // 再切掉头部
+    const mark = document.createElement('mark');
+    mark.className = 'anno' + (seg.hasNote ? ' has-note' : '');
+    mark.dataset.aid = seg.id;
+    mark.style.setProperty('--ac', seg.color);
+    target.parentNode.insertBefore(mark, target);
+    mark.appendChild(target);
+  }
+}
+function applyAnnosToPara(el, pidx) {
+  const segs = annoMap.get(pidx);
+  if (!segs || !segs.length) return;
+  for (const s of segs) _wrapRangeInMarks(el, s);
+}
+
+/* ---- 批注弹层 ---- */
+function openAnnoPop(id, anchorEl) {
+  const a = state.annos.find(x => x.id === id);
+  if (!a) return;
+  popAnnoId = id;
+  hideSelBar();
+  const pop = $('#annoPop');
+  $('#apExcerpt').textContent = a.text;
+  $('#apExcerpt').style.setProperty('--apc', a.color);
+  $('#apNote').value = a.note || '';
+  $$('#apColors .ap-dot').forEach(d => d.classList.toggle('on', d.dataset.c === a.color));
+  pop.hidden = false;
+  const rect = anchorEl ? anchorEl.getBoundingClientRect() : null;
+  const pw = pop.offsetWidth || 320, ph = pop.offsetHeight || 240;
+  let x = rect ? rect.left + rect.width / 2 - pw / 2 : (window.innerWidth - pw) / 2;
+  x = Math.max(8, Math.min(x, window.innerWidth - pw - 8));
+  let y = rect ? rect.bottom + 10 : (window.innerHeight - ph) / 2;
+  if (y + ph > window.innerHeight - 8) y = Math.max(8, (rect ? rect.top : ph) - ph - 10);
+  pop.style.left = x + 'px';
+  pop.style.top = y + 'px';
+}
+function closeAnnoPop() { $('#annoPop').hidden = true; popAnnoId = null; }
+
+function saveAnnoNote() {
+  const a = state.annos.find(x => x.id === popAnnoId);
+  if (!a) return closeAnnoPop();
+  a.note = $('#apNote').value.trim();
+  a.ts = Date.now();
+  persistAnnos();
+  closeAnnoPop();
+  buildAnnoList($('#annoSearch').value);
+  renderChapter(state.chapter, true);   // 刷新 has-note 记号
+  toast(a.note ? '笔记已保存' : '已清空笔记');
+}
+function deleteAnno(id) {
+  state.annos = state.annos.filter(x => x.id !== id);
+  persistAnnos();
+  closeAnnoPop();
+  buildAnnoList($('#annoSearch').value);
+  if (state.book) renderChapter(state.chapter, true);
+  toast('已删除高亮');
+}
+
+/* ---- 侧栏「笔记」页签：列表 + 搜索 + 跳转定位 ---- */
+function switchSideTab(tab) {
+  $('#tabToc').classList.toggle('on', tab === 'toc');
+  $('#tabAnno').classList.toggle('on', tab === 'anno');
+  $('#tocPane').hidden = tab !== 'toc';
+  $('#annoPane').hidden = tab !== 'anno';
+  if (tab === 'anno') buildAnnoList($('#annoSearch').value);
+}
+
+function buildAnnoList(filter = '') {
+  const box = $('#annoList');
+  const cnt = $('#annoCount');
+  if (!box) return;
+  box.replaceChildren();
+  const total = state.book ? state.annos.length : 0;
+  cnt.hidden = !total;
+  cnt.textContent = total;
+
+  const kw = filter.trim().toLowerCase();
+  const sorted = [...state.annos].sort((x, y) =>
+    x.ch - y.ch || x.ps - y.ps || x.so - y.so);
+  const frag = document.createDocumentFragment();
+  let shown = 0;
+
+  for (const a of sorted) {
+    const chTitle = state.book?.chapters[a.ch]?.title || '';
+    if (kw && !(a.text.toLowerCase().includes(kw)
+             || (a.note || '').toLowerCase().includes(kw)
+             || chTitle.toLowerCase().includes(kw))) continue;
+    shown++;
+    const item = document.createElement('button');
+    item.className = 'anno-item';
+    item.dataset.aid = a.id;
+
+    const top = document.createElement('span');
+    top.className = 'ai-top';
+    const dot = document.createElement('span');
+    dot.className = 'ai-dot';
+    dot.style.background = a.color;
+    const chEl = document.createElement('span');
+    chEl.className = 'ai-ch';
+    chEl.textContent = `${a.ch + 1} · ${chTitle}`;
+    const del = document.createElement('span');
+    del.className = 'ai-del';
+    del.textContent = '✕';
+    del.title = '删除这条高亮';
+    top.append(dot, chEl, del);
+
+    const t = document.createElement('span');
+    t.className = 'ai-text';
+    t.textContent = a.text;
+
+    item.append(top, t);
+    if (a.note) {
+      const nt = document.createElement('span');
+      nt.className = 'ai-note';
+      nt.textContent = a.note;
+      item.appendChild(nt);
+    }
+    frag.appendChild(item);
+  }
+
+  if (!shown) {
+    const d = document.createElement('div');
+    d.className = 'anno-empty';
+    d.textContent = state.book
+      ? (total ? '没有匹配的高亮或笔记' : '还没有高亮。\n在阅读区选中一段文字，就会弹出荧光笔。')
+      : '先打开一本书。';
+    frag.appendChild(d);
+  }
+  box.appendChild(frag);
+}
+
+/* 跳转到某条高亮：切章（如需）→ 滚动到 <mark> → 闪烁两下 */
+async function jumpToAnno(id) {
+  const a = state.annos.find(x => x.id === id);
+  if (!a || !state.book) return;
+  if (state.chapter !== a.ch) await renderChapter(a.ch, true);
+  requestAnimationFrame(() => {
+    const m = document.querySelector(`mark[data-aid="${a.id}"]`);
+    if (!m) return;
+    m.scrollIntoView?.({ block: 'center' });
+    m.classList.add('anno-flash');
+    setTimeout(() => m.classList.remove('anno-flash'), 1700);
+  });
+  updatePager();
+  if (window.innerWidth <= 820) closeSidebar();
+}
+
+/* ============================================================
    9. 打开文件
    ============================================================ */
 async function openFile(file) {
@@ -3596,6 +4118,8 @@ async function openFile(file) {
                                      : `TXT · ${book.chapters.length} 章`);
     state.book = book;
     state.chapter = 0;
+    loadAnnos(book.id);            // 这本书的高亮/笔记（按书 id 存取）
+    buildAnnoList();
 
     // UI 切换
     $('#empty').classList.add('hidden');
@@ -3639,6 +4163,7 @@ function goHome(confirmFirst = true) {
     }
     savePDFProgress();
     closePDFViewer();
+    hideSelBar(); closeAnnoPop();
     $('#tocList').replaceChildren();
     $('#scroller').scrollTop = 0;
     $('#bookTitle').textContent = '未打开书籍';
@@ -3661,6 +4186,9 @@ function goHome(confirmFirst = true) {
   state.renderToken++;
   state.book = null;
   state.chapter = 0;
+  state.annos = [];
+  hideSelBar(); closeAnnoPop();
+  buildAnnoList();
 
   $('#reader').replaceChildren();
   $('#tocList').replaceChildren();
@@ -3714,6 +4242,8 @@ This paragraph is written in English so you can compare how the algorithm behave
   };
   state.book = book;
   state.chapter = 0;
+  loadAnnos(book.id);
+  buildAnnoList();
   $('#empty').classList.add('hidden');
   $('#bookTitle').textContent = `${book.title} · 示例文本`;
   ['#btnBionic', '#btnTheme', '#btnPanel'].forEach(s => $(s).disabled = false);
@@ -4012,6 +4542,92 @@ function bind() {
     tocTimer = setTimeout(() => buildToc(e.target.value), 140);
   };
 
+  // --- 荧光笔 / 笔记批注（数据结构见 8b 节） ---
+  // 工具条与批注层的色块都按 HL_COLORS 生成
+  HL_COLORS.forEach(({ c, n }) => {
+    const d = document.createElement('button');
+    d.className = 'sel-dot';
+    d.style.background = c;
+    d.title = `高亮为${n}色`;
+    d.dataset.c = c;
+    $('#selSwatches').appendChild(d);
+
+    const p = document.createElement('button');
+    p.className = 'ap-dot';
+    p.style.background = c;
+    p.title = `改为${n}色`;
+    p.dataset.c = c;
+    $('#apColors').appendChild(p);
+  });
+
+  $('#selSwatches').addEventListener('click', e => {
+    const d = e.target.closest('.sel-dot');
+    if (d) addAnno(d.dataset.c);
+  });
+  $('#selNote').addEventListener('click', () => addAnno(state.prefs.hlColor || '#ffd600', true));
+
+  // 划词结束 → 出工具条。mouseup 在选区定稿后触发；
+  // 触屏端 selectionchange 时机飘，touchend 后稍等再读选区。
+  $('#reader').addEventListener('mouseup', () => {
+    setTimeout(() => {
+      pendingSel = captureSelection();
+      pendingSel ? showSelBar() : hideSelBar();
+    }, 10);
+  });
+  $('#reader').addEventListener('touchend', () => {
+    setTimeout(() => {
+      pendingSel = captureSelection();
+      if (pendingSel) showSelBar();
+    }, 300);
+  });
+  // 点已有高亮 → 批注弹层
+  $('#reader').addEventListener('click', e => {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;   // 划选结束的 click 不算"点高亮"
+    const m = e.target.closest('mark.anno');
+    if (m && $('#reader').contains(m)) openAnnoPop(m.dataset.aid, m);
+  });
+  // 按下开始新选区 / 点到工具条与弹层之外 → 收浮层
+  document.addEventListener('mousedown', e => {
+    if (!e.target.closest('#selBar')) hideSelBar();
+    if (!e.target.closest('#annoPop') && !e.target.closest('mark.anno')) closeAnnoPop();
+  });
+  $('#scroller').addEventListener('scroll', hideSelBar, { passive: true });
+
+  // 批注弹层：保存 / 删除 / 关闭 / 改色
+  $('#apSave').onclick = saveAnnoNote;
+  $('#apDelete').onclick = () => popAnnoId && deleteAnno(popAnnoId);
+  $('#apClose').onclick = closeAnnoPop;
+  $('#apColors').addEventListener('click', e => {
+    const d = e.target.closest('.ap-dot');
+    const a = state.annos.find(x => x.id === popAnnoId);
+    if (!d || !a) return;
+    a.color = d.dataset.c;
+    a.ts = Date.now();
+    persistAnnos();
+    $$('#apColors .ap-dot').forEach(x => x.classList.toggle('on', x === d));
+    $$(`mark[data-aid="${a.id}"]`).forEach(m => m.style.setProperty('--ac', a.color));
+    $('#apExcerpt').style.setProperty('--apc', a.color);
+    buildAnnoList($('#annoSearch').value);
+  });
+
+  // 侧栏页签 + 笔记列表
+  $('#tabToc').onclick = () => switchSideTab('toc');
+  $('#tabAnno').onclick = () => switchSideTab('anno');
+  let annoTimer;
+  $('#annoSearch').oninput = e => {
+    clearTimeout(annoTimer);
+    annoTimer = setTimeout(() => buildAnnoList(e.target.value), 140);
+  };
+  $('#annoList').addEventListener('click', e => {
+    const del = e.target.closest('.ai-del');
+    const item = e.target.closest('.anno-item');
+    if (!item) return;
+    if (del) { deleteAnno(item.dataset.aid); return; }
+    jumpToAnno(item.dataset.aid);
+  });
+  $('#btnAnnos').onclick = () => { openSidebar(); switchSideTab('anno'); };
+
   // --- 底部章节条 ---
   $('#pgNextCh').onclick = () => nextChapter();
   $('#pgPrevCh').onclick = () => prevChapter();
@@ -4117,6 +4733,7 @@ function bind() {
 
     switch (e.key) {
       case 'Escape':
+        hideSelBar(); closeAnnoPop();
         closePanel(); closeSidebar();
         if (typing) e.target.blur();
         break;
@@ -4124,6 +4741,9 @@ function bind() {
       case 't': case 'T': $('#btnTheme').disabled  || $('#btnTheme').click();  break;
       case 'p': case 'P': $('#btnPanel').disabled  || $('#btnPanel').click();  break;
       case 's': case 'S': state.book && toggleSidebar(); break;
+      case 'n': case 'N':
+        if (state.book) { openSidebar(); switchSideTab('anno'); }
+        break;
       case 'h': case 'H': goHome(state.book || pdfView.doc ? true : false); break;
       /* PDF 模式：上下键/PgUp/PgDn/空格翻页，与工具栏按钮一致。
          单独的 + / - 用于缩放（也在 PDF 工具栏里）。 */

@@ -254,50 +254,90 @@ console.log('\n=== 9. 全局降级：一次改令牌，所有 UI 一起生效 ==
   }
 }
 
-console.log('\n=== 10. 卡片竖向节奏（用户反馈"调节文字位置"）===');
+console.log('\n=== 10. 卡片竖向节奏（用户反馈"每行与按钮的间隔差太大"）===');
 {
-  // 原来：图标→标题 18 / 标题→说明 9 / 说明→按钮 20 / 按钮→提示 -8 / 提示→列表 16
-  // 三个问题：标题与说明太挤；提示被**负 margin** 硬拽到按钮下；
-  // 列表上方 22+18=40px，比其它间隙大一倍多 → 看起来"上面挤、下面空"。
-  // ★ margin 简写要取**最后一个**长度值（下边距），
-  //   直接 parseFloat("0 0 10px") 会得到 0 —— 这是测试自身的坑，不是产品问题。
-  const num = (sel, prop) => {
-    const v = (ruleOf(sel).match(new RegExp(prop + '\\s*:\\s*([^;}]+)')) || [])[1] || '';
-    const parts = v.match(/-?[\d.]+(?:px|em|rem|%)?/g) || [];
-    // 取最后一个带单位的数字；没有单位就取最后一个数字
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const n = parseFloat(parts[i]);
-      if (!isNaN(n) && n !== 0) return n;
-    }
-    return 0;
+  // 演进史：
+  //   1.0：图标→标题 18 / 标题→说明 9 / 说明→按钮 20 / 按钮→提示 **-8** / 提示→列表 16
+  //        → 上面挤、下面空，提示被负 margin 硬拽到按钮下。
+  //   1.1：改成 4/10/22/10/20+18 —— 仍然忽宽忽窄（按钮上方 22、下方 10）。
+  //   1.2（现在）：所有块间距统一走 --row-gap（18px），任何一处都不再单独写死。
+  // ★ 断言方式也随之改变：不再逐个比像素，而是确认**每个间距都引用同一个变量**，
+  //   这样以后调总间距只改一个数，且不可能再出现"某一段特别宽"。
+  const cardRule = ruleOf('.drop-card');
+  const gapVar = (cardRule.match(/--row-gap\s*:\s*([\d.]+)px/) || [])[1];
+  const gap = gapVar ? +gapVar : 0;
+  const usesGap = (sel, prop) =>
+    new RegExp(prop + '\\s*:[^;}]*var\\(--row-gap(?:\\s*,\\s*[^)]*)?\\)').test(ruleOf(sel));
+
+  const gaps = {
+    '图标→标题': usesGap('.drop-card .big', 'margin-bottom'),
+    '标题→说明': usesGap('.drop-card h1', 'margin'),
+    '说明→按钮': usesGap('.drop-card p', 'margin'),
+    '按钮→提示': usesGap('.drop-card .fmt-tip', 'margin'),
+    '提示→列表': usesGap('.fmt-list', 'margin-top'),
+    '列表内上留白': usesGap('.fmt-list', 'padding-top'),
   };
+  const uneven = Object.entries(gaps).filter(([, v]) => !v).map(([k]) => k);
+  console.log(`     --row-gap = ${gap}px，未统一的间距：${uneven.length ? uneven.join('、') : '无'}`);
 
-  const iconGap  = num('.drop-card .big', 'margin-bottom');
-  const titleGap = num('.drop-card h1', 'margin');     // margin:0 0 10px → 10
-  const descGap  = num('.drop-card p', 'margin');      // margin:0 auto 22px → 22
-  const tipTop   = num('.fmt-tip', 'margin');          // margin:10px auto 0 → 10
-
-  console.log(`     图标→标题 ${iconGap} / 标题→说明 ${titleGap} / 说明→按钮 ${descGap} / 按钮→提示 ${tipTop}`);
+  ok(gap >= 14 && gap <= 24, `统一间距值合理（${gap}px，14~24 区间）`);
+  ok(!uneven.length, '六处行间距全部引用同一个 --row-gap，不再忽宽忽窄');
 
   // 关键回归：提示不再用负 margin
-  ok(!/margin\s*:\s*-/.test(ruleOf('.fmt-tip')),
+  ok(!/margin\s*:\s*-/.test(ruleOf('.drop-card .fmt-tip')),
      '提示不再用负 margin 硬拽到按钮下（旧值 -8px）');
-  ok(tipTop >= 8, `按钮与提示之间有正常间距（${tipTop}px ≥ 8px）`);
 
-  // 标题与说明之间要有呼吸（旧值 9px 太挤）
-  ok(titleGap >= 10, `标题与说明之间有呼吸（${titleGap}px ≥ 10px，旧值 9px）`);
-
-  // 间距不该"下重上轻"
-  const listTop = num('.fmt-list', 'margin-top');
-  ok(listTop <= descGap, `列表上方留白(${listTop}px) ≤ 说明→按钮(${descGap}px)`);
+  // 关键回归：提示是 <p>，`.drop-card p` 的 margin 会压掉单类 `.fmt-tip` 的 margin-top，
+  // 结果按钮与提示的间距变成 0（用户："两个按钮不要和下面字接那么近"）。
+  // 只有写成 `.drop-card .fmt-tip`（两个类）才压得住。
+  ok(/(^|\})\s*\.drop-card\s+\.fmt-tip\s*\{/m.test(style),
+     '提示规则用双类选择器，不会被 .drop-card p 的 margin 覆盖成 0');
 
   // 长文本限宽，避免折行参差
   ok(/max-width/.test(ruleOf('.drop-card p')), '说明文字限宽（折行更整齐）');
-  ok(/max-width/.test(ruleOf('.fmt-tip')), '提示文字限宽');
+  ok(/max-width/.test(ruleOf('.drop-card .fmt-tip')), '提示文字限宽');
+
+  // 首页文字用思源宋体（Noto Serif SC）
+  ok(/font-family\s*:[^;}]*Noto Serif SC/.test(cardRule),
+     '首页卡片文字使用思源宋体（Noto Serif SC）');
+
+  // 毛玻璃更通透：卡片底色不透明度已从 62% 降到 40%
+  const cardAlpha = +(cardRule.match(/--bg-elev\)\s*(\d+)%/) || [])[1];
+  ok(cardAlpha > 0 && cardAlpha <= 45,
+     `卡片玻璃更透（底色 ${cardAlpha}% ≤ 45%，旧值 62%）`);
+  ok(/rgba\(28,\s*30,\s*35,\s*\.40\)/.test(style), '深色主题卡片同步降到 40% 不透明度');
 
   // 窄窗口兜底
   ok(/overflow-y\s*:\s*auto/.test(ruleOf('#empty')),
      '#empty 允许纵向滚动（矮窗口下卡片不会被裁）');
+
+  // 首页整体上移：居中靠"下内边距多加 2 倍上移量"实现（不用 transform，
+  // 否则会和拖放时的 .drop-card.over 缩放抢同一个属性）
+  const emptyRule = ruleOf('#empty');
+  const lift = (emptyRule.match(/--home-lift\s*:\s*([\d.]+)vh/) || [])[1];
+  ok(lift && +lift > 0, `首页设了上移量（${lift || 0}vh）`);
+  ok(/padding\s*:[^;}]*var\(--home-lift\)/.test(emptyRule),
+     '上移量通过下内边距生效（2 倍补偿 flex 居中）');
+  ok(!/transform\s*:[^;}]*translateY/.test(ruleOf('.drop-card')),
+     '上移没有用 transform（避免与拖放缩放冲突）');
+
+  // 用户："加粗所有文字，最上面那行字字号放大"
+  {
+    const baseW = +(cardRule.match(/font-weight\s*:\s*(\d+)/) || [])[1] || 0;
+    ok(baseW >= 600, `卡片整体字重 ${baseW}（≥600，所有文字继承加粗）`);
+
+    const h1Rule = ruleOf('.drop-card h1');
+    const h1Size = +(h1Rule.match(/font-size\s*:\s*([\d.]+)px/) || [])[1] || 0;
+    const h1W = +(h1Rule.match(/font-weight\s*:\s*(\d+)/) || [])[1] || 0;
+    ok(h1Size >= 24, `标题字号放大到 ${h1Size}px（旧值 21px）`);
+    ok(h1W >= 700, `标题字重 ${h1W}（加粗）`);
+
+    const btnW = +(ruleOf('.drop-card .btn').match(/font-weight\s*:\s*(\d+)/) || [])[1] || 0;
+    ok(btnW >= 700, `按钮字重 ${btnW}（.btn 自身的 600 已被覆盖）`);
+
+    const listW = +(ruleOf('.fmt-list b').match(/font-weight\s*:\s*(\d+)/) || [])[1] || 0;
+    ok(listW >= 700, `列表小标题字重 ${listW}`);
+  }
 }
 
 console.log('\n=== 11. 阅读区背景图（开关打开时生效）===');
