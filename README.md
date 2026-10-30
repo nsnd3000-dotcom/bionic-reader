@@ -9,8 +9,19 @@
 
 ---
 
+## 🌐 在线访问（免安装）
+
+👉 **<https://nsnd3000-dotcom.github.io/NonexistentLibrary/>**
+
+浏览器直接打开就能用，不用下载、不用起本地服务。设置与阅读进度存在你自己浏览器的本地存储里，不会上传到任何服务器。手机、平板、临时借用的电脑都可以。
+
+桌面版（便携 exe / win64 压缩包）：[NonexistentLibraryDesk](https://github.com/nsnd3000-dotcom/NonexistentLibraryDesk)
+
+---
+
 ## 目录
 
+- [在线访问（免安装）](#在线访问免安装)
 - [快速开始](#快速开始)
 - [项目位置与结构](#项目位置与结构)
 - [功能清单](#功能清单)
